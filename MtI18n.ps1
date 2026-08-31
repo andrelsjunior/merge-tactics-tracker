@@ -81,6 +81,7 @@ $script:MtStrings = @{
         'menu.pause'        = 'Pausar coleta'
         'menu.resume'       = 'Retomar coleta'
         'menu.lang'         = 'Switch to English'
+        'menu.tray'         = 'Minimizar para a bandeja'
         'menu.quit'         = 'Sair'
 
         'tray.tip'          = '{0} troféus - {1}'
@@ -172,6 +173,7 @@ $script:MtStrings = @{
         'menu.pause'        = 'Pause collection'
         'menu.resume'       = 'Resume collection'
         'menu.lang'         = 'Mudar para português'
+        'menu.tray'         = 'Minimize to the tray'
         'menu.quit'         = 'Quit'
 
         'tray.tip'          = '{0} trophies - {1}'

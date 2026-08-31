@@ -83,6 +83,9 @@ $script:Db = Open-MtDb
 # saved language, else the Windows one
 $savedLang = Get-MtState $script:Db 'lang'
 $script:MtLang = if ($savedLang -in @('pt', 'en')) { $savedLang } else { Get-MtSystemLang }
+# Minimising to the tray instead of the taskbar. On by default: the window
+# already lives in the tray, so a taskbar button for it is a second home.
+$script:MtToTray = ((Get-MtState $script:Db 'to_tray') -ne '0')
 
 # In-memory state. Explicitly script-scoped, like every other value the
 # functions read: PowerShell resolves an unqualified name by walking the call
@@ -123,28 +126,32 @@ function Clear-MtAlert([string]$Key) {
 # The interval only loosens once the data proves the real minimum spacing
 # between matches. Samples taken at a slow pace are discarded: their gap is
 # inflated by the sampling itself and would feed back into the decision.
-function Get-MtSafeIdleInterval {
+# Both interval decisions need the smallest real spacing between reliable
+# matches. It scans the whole history and ran twice a minute, so it is computed
+# once and kept until a new match lands.
+$script:MinGap = @{ Ts = -1; Value = 0; N = 0 }
+function Get-MtMinGap {
+    if (-not (Test-Path variable:script:MinGap)) { $script:MinGap = @{ Ts = -1; Value = 0; N = 0 } }
+    $last = [int](Invoke-MtQuery $script:Db "SELECT IFNULL(MAX(ts),0) m FROM matches")[0]['m']
+    if ($script:MinGap.Ts -eq $last) { return $script:MinGap }
     $rows = Invoke-MtQuery $script:Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$script:BaseInterval ORDER BY ts"
-    if ($rows.Count -lt $script:CalibMinSamples) { return $script:BaseInterval }
-    $gaps = @()
+    $min = 0
     for ($i = 1; $i -lt $rows.Count; $i++) {
         $g = [int]$rows[$i]['ts'] - [int]$rows[$i-1]['ts']
-        if ($g -gt 0 -and $g -le 3600) { $gaps += $g }
+        if ($g -gt 0 -and $g -le 3600 -and ($min -eq 0 -or $g -lt $min)) { $min = $g }
     }
-    if (-not $gaps.Count) { return $script:BaseInterval }
-    [Math]::Max($script:BaseInterval, [Math]::Min($script:MaxIdleInterval, [int]($gaps | Measure-Object -Minimum).Minimum / 2))
+    $script:MinGap = @{ Ts = $last; Value = $min; N = $rows.Count }
+    $script:MinGap
+}
+
+function Get-MtSafeIdleInterval {
+    $m = Get-MtMinGap
+    if ($m.N -lt $script:CalibMinSamples -or $m.Value -eq 0) { return $script:BaseInterval }
+    [Math]::Max($script:BaseInterval, [Math]::Min($script:MaxIdleInterval, [int]($m.Value / 2)))
 }
 function Get-MtCertaintyThreshold {
-    $n = [int](Invoke-MtQuery $script:Db "SELECT COUNT(*) c FROM matches WHERE certain=1 AND sample_s<=$script:BaseInterval")[0]['c']
-    if ($n -ge $script:CalibMinSamples) {
-        $rows = Invoke-MtQuery $script:Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$script:BaseInterval ORDER BY ts"
-        $gaps = @()
-        for ($i = 1; $i -lt $rows.Count; $i++) {
-            $g = [int]$rows[$i]['ts'] - [int]$rows[$i-1]['ts']
-            if ($g -gt 0 -and $g -le 3600) { $gaps += $g }
-        }
-        if ($gaps.Count) { return ($gaps | Measure-Object -Minimum).Minimum }
-    }
+    $m = Get-MtMinGap
+    if ($m.N -ge $script:CalibMinSamples -and $m.Value -gt 0) { return $m.Value }
     $script:BaseInterval * 3
 }
 
@@ -293,27 +300,29 @@ function Get-MtPlacement([int]$Delta) {
 function Get-MtSummary([int]$Since = 0) {
     # The current value is the newest record, from snapshots or matches. Reading
     # snapshots alone left the header one step behind.
-    $cur = Invoke-MtQuery $script:Db @"
-SELECT v FROM (SELECT ts, trophies AS v FROM snapshots
-               UNION ALL SELECT ts, curr AS v FROM matches)
-ORDER BY ts DESC LIMIT 1
+    # One pass over the union instead of two, and one read of state instead of
+    # three: this runs on every poll and on every repaint.
+    $agg = Invoke-MtQuery $script:Db @"
+SELECT (SELECT v FROM (SELECT ts, trophies AS v FROM snapshots
+                       UNION ALL SELECT ts, curr AS v FROM matches)
+        ORDER BY ts DESC LIMIT 1) AS atual,
+       (SELECT IFNULL(MAX(v),0) FROM (SELECT trophies AS v FROM snapshots
+                                      UNION ALL SELECT curr AS v FROM matches)) AS pico,
+       (SELECT COUNT(*) FROM matches) AS total
 "@
-    $trophies = if ($cur.Count) { [int]$cur[0]['v'] } else { 0 }
+    $trophies = if ($agg.Count -and $agg[0]['atual']) { [int]$agg[0]['atual'] } else { 0 }
+    $st = @{}
+    foreach ($r in (Invoke-MtQuery $script:Db "SELECT k, v FROM state")) { $st[[string]$r['k']] = $r['v'] }
     # The API's bestTrophies lags, so the best is the max of the two sources.
-    $pk = Invoke-MtQuery $script:Db @"
-SELECT IFNULL(MAX(v),0) m FROM (SELECT trophies AS v FROM snapshots
-                                UNION ALL SELECT curr AS v FROM matches)
-"@
-    $bestApi = Get-MtState $script:Db 'best'
-    $best = [Math]::Max($(if ($bestApi) { [int]$bestApi } else { 0 }), [int]$pk[0]['m'])
+    $bestApi = if ($st.ContainsKey('best') -and $st['best']) { [int]$st['best'] } else { 0 }
     [ordered]@{
-        Name     = (Get-MtState $script:Db 'name')
-        Arena    = (Get-MtState $script:Db 'arena')
-        Best     = $best
+        Name     = $(if ($st.ContainsKey('name')) { $st['name'] } else { $null })
+        Arena    = $(if ($st.ContainsKey('arena')) { $st['arena'] } else { $null })
+        Best     = [Math]::Max($bestApi, [int]$agg[0]['pico'])
         Trophies = $trophies
-        Total    = [int](Invoke-MtQuery $script:Db "SELECT COUNT(*) c FROM matches")[0]['c']
+        Total    = [int]$agg[0]['total']
         Streak   = Get-MtStreak
-        Streaks = Get-MtStreaks $Since
+        Streaks  = Get-MtStreaks $Since
     }
 }
 
@@ -349,7 +358,7 @@ function Get-MtPlacements([int]$Since = 0) {
     $sum = 0
     foreach ($r in $rows) {
         $d = [int]$r['delta']
-        $p = Get-MtPlacement $d
+        $p = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
         $cnt[$p]++
         $sum += $p
         if ([int]$r['certain'] -ne 1) { $uncertain++ }
@@ -380,7 +389,7 @@ function Get-MtPlacements([int]$Since = 0) {
     }
 }
 
-function Get-MtSeries([int]$Since = 0) {
+function Get-MtSeries([int]$Since = 0, [int]$MaxPoints = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $rows = Invoke-MtQuery $script:Db @"
 SELECT ts, trophies AS v FROM snapshots $w
@@ -390,17 +399,41 @@ ORDER BY ts
 "@
     # Collapse repeats: the hourly heartbeat writes the same value many times,
     # which drew a long false flat line. The last point is always kept.
-    $out = @()
+    $out = New-Object 'System.Collections.Generic.List[object]'
     $prev = $null
-    $all = @($rows)
-    for ($i = 0; $i -lt $all.Count; $i++) {
-        $v = [int]$all[$i]['v']
-        if ($null -eq $prev -or $v -ne $prev -or $i -eq $all.Count - 1) {
-            $out += [pscustomobject]@{ Ts = [int]$all[$i]['ts']; V = $v }
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $v = [int]$rows[$i]['v']
+        if ($null -eq $prev -or $v -ne $prev -or $i -eq $rows.Count - 1) {
+            $out.Add([pscustomobject]@{ Ts = [int]$rows[$i]['ts']; V = $v })
             $prev = $v
         }
     }
-    @($out)
+    if ($MaxPoints -le 0 -or $out.Count -le $MaxPoints) { return $out.ToArray() }
+
+    # A season produces thousands of points for a chart 868 pixels wide, and the
+    # chart spaces them by index. Each bucket keeps its lowest and highest point,
+    # in order, so the peaks survive the reduction.
+    # two per slice (the low and the high), plus the real first and last point
+    $slices = [Math]::Max(1, [int](($MaxPoints - 2) / 2))
+    $res = New-Object 'System.Collections.Generic.List[object]'
+    $size = $out.Count / $slices
+    for ($b = 0; $b -lt $slices; $b++) {
+        $from = [int]($b * $size)
+        $to   = [Math]::Min($out.Count - 1, [int](($b + 1) * $size) - 1)
+        if ($from -gt $to) { continue }
+        $lo = $from; $hi = $from
+        for ($i = $from; $i -le $to; $i++) {
+            if ($out[$i].V -lt $out[$lo].V) { $lo = $i }
+            if ($out[$i].V -gt $out[$hi].V) { $hi = $i }
+        }
+        if ($lo -eq $hi) { $res.Add($out[$lo]) }
+        elseif ($lo -lt $hi) { $res.Add($out[$lo]); $res.Add($out[$hi]) }
+        else { $res.Add($out[$hi]); $res.Add($out[$lo]) }
+    }
+    # the true ends must survive, or the curve starts and ends in the wrong place
+    if ($res[0].Ts -ne $out[0].Ts) { $res.Insert(0, $out[0]) }
+    if ($res[$res.Count - 1].Ts -ne $out[$out.Count - 1].Ts) { $res.Add($out[$out.Count - 1]) }
+    $res.ToArray()
 }
 
 # Play sessions: matches less than 30 min apart belong to the same session. That
@@ -410,39 +443,57 @@ function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
     $rows = (Invoke-MtQuery $script:Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts")
     if ($rows.Count -eq 0) { return @() }
     $gap = $GapMin * 60
-    $out = @()
+    # Lists, not arrays: $out += copies the whole array on every append, which
+    # turned one season of history into 300 ms of pure copying.
+    $out = New-Object 'System.Collections.Generic.List[object]'
     $cur = $null
     foreach ($r in $rows) {
         $ts = [int]$r['ts']; $d = [int]$r['delta']; $c = [int]$r['curr']
         $ct = [int]$r['certain']
-        $pl = Get-MtPlacement $d
-        # each session carries its own matches, so expanding a row needs no
-        # second query
-        $m = [pscustomobject]@{ Ts = $ts; Delta = $d; Curr = $c; Certain = $ct; Place = $pl }
+        # placement inlined: a function call costs ~8 us and this runs per match
+        $pl = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
         if ($null -eq $cur -or ($ts - $cur.End) -gt $gap) {
-            if ($cur) { $out += $cur }
+            if ($cur) { $out.Add($cur) }
             $cur = [pscustomobject]@{
                 Start = $ts; End = $ts; N = 1; Net = $d
                 Up = $(if ($d -gt 0) { 1 } else { 0 })
                 EndTro = $c; StartTro = ($c - $d)
-                P = @(0, 0, 0, 0, 0); Matches = @($m)
+                P = @(0, 0, 0, 0, 0); Matches = $null; AvgPlace = 0
             }
             $cur.P[$pl] = 1
         } else {
             $cur.End = $ts; $cur.N++; $cur.Net += $d; $cur.EndTro = $c
             if ($d -gt 0) { $cur.Up++ }
             $cur.P[$pl]++
-            $cur.Matches += $m
         }
     }
-    if ($cur) { $out += $cur }
-    foreach ($sx in $out) {
-        $sx | Add-Member -NotePropertyName AvgPlace -NotePropertyValue $(
-            if ($sx.N) { [math]::Round((($sx.P[1] * 1) + ($sx.P[2] * 2) + ($sx.P[3] * 3) + ($sx.P[4] * 4)) / $sx.N, 2) } else { 0 })
-        [array]::Reverse($sx.Matches)
+    if ($cur) { $out.Add($cur) }
+    $all = $out.ToArray()
+    foreach ($sx in $all) {
+        $sx.AvgPlace = if ($sx.N) {
+            [math]::Round((($sx.P[1] * 1) + ($sx.P[2] * 2) + ($sx.P[3] * 3) + ($sx.P[4] * 4)) / $sx.N, 2)
+        } else { 0 }
     }
-    [array]::Reverse($out)
-    @($out)
+    [array]::Reverse($all)
+    $all
+}
+
+# The matches of one session, fetched when its row is expanded. Building them
+# for every session cost ten times the rest of the tab, to show one.
+function Get-MtSessionMatches([int]$Start, [int]$End) {
+    $rows = Invoke-MtQuery $script:Db @"
+SELECT ts, delta, curr, certain FROM matches
+WHERE ts >= $Start AND ts <= $End ORDER BY ts DESC
+"@
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($r in $rows) {
+        $d = [int]$r['delta']
+        $out.Add([pscustomobject]@{
+            Ts = [int]$r['ts']; Delta = $d; Curr = [int]$r['curr']; Certain = [int]$r['certain']
+            Place = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
+        })
+    }
+    $out.ToArray()
 }
 
 # Performance by hour of day. No other source crosses these two.
@@ -580,14 +631,16 @@ function Get-MtRecent([int]$Since = 0, [int]$Limit = 5) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $lim = if ($Limit -gt 0) { "LIMIT $Limit" } else { "" }
     $rows = Invoke-MtQuery $script:Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts DESC $lim"
-    @($rows | ForEach-Object {
-        $d = [int]$_['delta']
-        [pscustomobject]@{
-            Ts = [int]$_['ts']; Delta = $d
-            Curr = [int]$_['curr']; Certain = [int]$_['certain']
-            Place = (Get-MtPlacement $d)
-        }
-    })
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($r in $rows) {
+        $d = [int]$r['delta']
+        $out.Add([pscustomobject]@{
+            Ts = [int]$r['ts']; Delta = $d
+            Curr = [int]$r['curr']; Certain = [int]$r['certain']
+            Place = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
+        })
+    }
+    $out.ToArray()
 }
 
 # =================================================================== interface
@@ -724,8 +777,12 @@ function Get-MtPeriodOptions {
     @($script:MtPeriods | ForEach-Object { @{ Key = $_.Key; Label = (L $_.LabelKey); Secs = $_.Secs } })
 }
 $script:MtPeriod = 'all'
-$script:MtPeriodAnterior = 'all'
+$script:MtPeriodPrev = 'all'
 $script:MtTab = 0
+$script:MtStale = @{ overview = $true; matches = $true; sessions = $true; hours = $true }
+# The chart is 868 px wide and spaces its points by index; beyond this they are
+# drawn on top of each other.
+$script:MtChartPoints = 900
 
 function Get-MtSince([string]$key) {
     $p = $script:MtPeriods | Where-Object { $_.Key -eq $key } | Select-Object -First 1
@@ -754,51 +811,73 @@ function Update-MtPanelData([string]$periodKey) {
     $c.Header.Tag = Get-MtSummary $since
     $c.Header.Invalidate()
 
-    $c.Chart.Tag = @{ Data = (Get-MtSeries $since); Hover = -1; Pts = @() }
+    $c.Chart.Tag = @{ Data = (Get-MtSeries $since $script:MtChartPoints); Hover = -1; Pts = @() }
     $c.Chart.Invalidate()
     $c.Daily.Tag  = @{ Data = (Get-MtDaily $since 14);  Caption = 'sec.daily'; Icon = 'cal' }
     $c.Daily.Invalidate()
     $c.Places.Tag = Get-MtPlacements $since
     $c.Places.Invalidate()
+    $c.List.Tag = @{ Rows = (Get-MtRecent $since 4); Scroll = 0; MaxScroll = 0
+                     Title = 'sec.recent' }
+    $c.List.Invalidate()
 
     # A repaint also happens on its own when a new match arrives. Zeroing Scroll
     # here would yank the list from under whoever is reading the history, so the
     # position only returns to the top when the period itself changes.
-    $reset = ($periodKey -ne $script:MtPeriodAnterior)
-    $script:MtPeriodAnterior = $periodKey
+    $reset = ($periodKey -ne $script:MtPeriodPrev)
+    $script:MtPeriodPrev = $periodKey
+
+    # Only the visible tab is filled in. The other three are marked stale and
+    # built when opened: recomputing all four cost close to a second per
+    # recorded match once the history reached a season.
+    foreach ($k in @($script:MtStale.Keys)) { $script:MtStale[$k] = $true }
+    Update-MtTabData $script:MtTab $since $reset
+    Update-MtFooter
+}
+
+# Builds one tab's blocks, if they are stale. Called by Update-MtPanelData for
+# the tab in view and by Set-MtTab for whichever is opened next.
+function Update-MtTabData([int]$index, [int]$since, [bool]$reset) {
+    $c = $script:PanelParts
+    if (-not $c) { return }
     $keepScroll = { param($ctl) if ($reset) { 0 } else { [int]$ctl.Tag.Scroll } }
 
-    $c.List.Tag = @{ Rows = (Get-MtRecent $since 4); Scroll = 0; MaxScroll = 0
-                     Title = 'sec.recent' }
-    $c.List.Invalidate()
-    $c.Full.Tag = @{ Rows = (Get-MtRecent $since 0); Scroll = (& $keepScroll $c.Full)
-                     MaxScroll = [int]$c.Full.Tag.MaxScroll
-                     Title = 'sec.history' }
-    $c.Full.Invalidate()
-    # The expanded session is found again by start time, not by index: when a new
-    # session appears on top the indices slide and the open row would jump.
-    $expandedTs = 0
-    if (-not $reset) {
-        $prevRows = @($c.Sessions.Tag.Rows)
-        $prevIdx = [int]$c.Sessions.Tag.Expanded
-        if ($prevIdx -ge 0 -and $prevIdx -lt $prevRows.Count) { $expandedTs = [int]$prevRows[$prevIdx].Start }
+    if ($index -eq 1 -and $script:MtStale['matches']) {
+        $c.Full.Tag = @{ Rows = (Get-MtRecent $since 0); Scroll = (& $keepScroll $c.Full)
+                         MaxScroll = [int]$c.Full.Tag.MaxScroll
+                         Title = 'sec.history' }
+        $c.Full.Invalidate()
+        $script:MtStale['matches'] = $false
     }
-    $sessions = @(Get-MtSessions $since)
-    $expanded = -1
-    if ($expandedTs) {
-        for ($k = 0; $k -lt $sessions.Count; $k++) {
-            if ([int]$sessions[$k].Start -eq $expandedTs) { $expanded = $k; break }
+    elseif ($index -eq 2 -and $script:MtStale['sessions']) {
+        # The expanded session is found again by start time, not by index: when a
+        # new session appears on top the indices slide and the open row jumps.
+        $expandedTs = 0
+        if (-not $reset) {
+            $prevRows = @($c.Sessions.Tag.Rows)
+            $prevIdx = [int]$c.Sessions.Tag.Expanded
+            if ($prevIdx -ge 0 -and $prevIdx -lt $prevRows.Count) { $expandedTs = [int]$prevRows[$prevIdx].Start }
         }
+        $sessions = @(Get-MtSessions $since)
+        $expanded = -1
+        if ($expandedTs) {
+            for ($k = 0; $k -lt $sessions.Count; $k++) {
+                if ([int]$sessions[$k].Start -eq $expandedTs) { $expanded = $k; break }
+            }
+        }
+        $c.Sessions.Tag = @{ Rows = $sessions; Scroll = (& $keepScroll $c.Sessions)
+                             MaxScroll = [int]$c.Sessions.Tag.MaxScroll
+                             Expanded = $expanded; Hits = @(); Fetch = $c.Sessions.Tag.Fetch }
+        $c.Sessions.Invalidate()
+        $script:MtStale['sessions'] = $false
     }
-    $c.Sessions.Tag = @{ Rows = $sessions; Scroll = (& $keepScroll $c.Sessions)
-                         MaxScroll = [int]$c.Sessions.Tag.MaxScroll
-                         Expanded = $expanded; Hits = @() }
-    $c.Sessions.Invalidate()
-    $c.Hours.Tag = Get-MtByHour $since
-    $c.Hours.Invalidate()
-    $c.Wdays.Tag = Get-MtByWeekday $since
-    $c.Wdays.Invalidate()
-    Update-MtFooter
+    elseif ($index -eq 3 -and $script:MtStale['hours']) {
+        $c.Hours.Tag = Get-MtByHour $since
+        $c.Hours.Invalidate()
+        $c.Wdays.Tag = Get-MtByWeekday $since
+        $c.Wdays.Invalidate()
+        $script:MtStale['hours'] = $false
+    }
 }
 
 # Switches tabs by showing and hiding each one's blocks.
@@ -806,6 +885,7 @@ function Set-MtTab([int]$index) {
     $script:MtTab = $index
     $c = $script:PanelParts
     if (-not $c) { return }
+    Update-MtTabData $index (Get-MtSince $script:MtPeriod) $false
     foreach ($x in @($c.Chart, $c.Daily, $c.Places, $c.List)) { $x.Visible = ($index -eq 0) }
     $c.Full.Visible     = ($index -eq 1)
     $c.Sessions.Visible = ($index -eq 2)
@@ -887,7 +967,7 @@ function Show-MtPanelCore {
     $tabs.Location = New-Object System.Drawing.Point 514, 153
     $f.Controls.Add($tabs)
 
-    $chart = New-MtAreaChart (Get-MtSeries $since) 868 214
+    $chart = New-MtAreaChart (Get-MtSeries $since $script:MtChartPoints) 868 214
     $chart.Location = New-Object System.Drawing.Point 26, 196
     $f.Controls.Add($chart)
 
@@ -910,7 +990,7 @@ function Show-MtPanelCore {
     $f.Controls.Add($full)
 
     # the Sessions and Hours tabs occupy the same area as the Overview blocks
-    $sessions = New-MtSessionList (Get-MtSessions $since) 868 584
+    $sessions = New-MtSessionList (Get-MtSessions $since) 868 584 { param($a, $b) Get-MtSessionMatches $a $b }
     $sessions.Location = New-Object System.Drawing.Point 26, 196
     $sessions.Visible = $false
     $f.Controls.Add($sessions)
@@ -1029,6 +1109,12 @@ $script:miPause.Add_Click({
     Update-MtMenuText
 })
 [void]$menu.Items.Add('-')
+$script:miTray = $menu.Items.Add('')
+$script:miTray.Add_Click({
+    $script:MtToTray = -not $script:MtToTray
+    Set-MtState $script:Db 'to_tray' $(if ($script:MtToTray) { '1' } else { '0' })
+    Update-MtMenuText
+})
 $script:miLang = $menu.Items.Add('')
 $script:miLang.Add_Click({ Set-MtLang $(if ($script:MtLang -eq 'pt') { 'en' } else { 'pt' }) })
 [void]$menu.Items.Add('-')
@@ -1039,6 +1125,8 @@ function Update-MtMenuText {
     $script:miNow.Text   = L 'menu.now'
     $script:miExp.Text   = L 'menu.export'
     $script:miPause.Text = if ($script:State.Paused) { L 'menu.resume' } else { L 'menu.pause' }
+    $script:miTray.Text    = L 'menu.tray'
+    $script:miTray.Checked = $script:MtToTray
     $script:miLang.Text  = L 'menu.lang'
     $script:miExit.Text  = L 'menu.quit'
 }
