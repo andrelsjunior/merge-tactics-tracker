@@ -1,0 +1,4 @@
+Put your Clash Royale API token here, on a single line.
+Generate one at https://developer.clashroyale.com
+The token is IP-locked: on a home connection it dies when your IP changes.
+Rename this file to token.txt

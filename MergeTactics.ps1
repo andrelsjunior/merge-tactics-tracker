@@ -1,6 +1,6 @@
-﻿# MergeTactics.ps1 - mini app de bandeja que coleta e mostra a evolucao da
-# conta de Merge Tactics. Fonte unica: API oficial do Clash Royale.
-# Um unico processo faz a coleta e a interface.
+﻿# MergeTactics.ps1 - tray app that collects and shows a Merge Tactics account.
+# Only source: the official Clash Royale API. One process does both the
+# collection and the interface.
 
 param([switch]$Hidden, [switch]$Watchdog)
 
@@ -15,61 +15,76 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# ---------------------------------------------------------------- configuracao
-# A tag do jogador e o token da API ficam em arquivos fora do repositorio.
-# Sem isso o app so serviria a uma conta, e o token vazaria no primeiro commit.
+# An exception inside a WinForms handler only raised a dialog and left nothing in
+# the log, so there was no function or line to investigate afterwards. The .NET
+# stack is all interpreter frames; ScriptStackTrace is the one that names them.
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($src, $e)
+    $ex = $e.Exception
+    $where = '?'
+    if ($ex.PSObject.Properties['ErrorRecord'] -and $ex.ErrorRecord) {
+        $where = ($ex.ErrorRecord.ScriptStackTrace -split "`n" | Select-Object -First 4) -join ' <- '
+    }
+    Write-MtLog ("UI: {0} | {1} | {2}" -f $ex.GetType().Name, $ex.Message, $where)
+})
+[AppDomain]::CurrentDomain.add_UnhandledException({
+    param($src, $e)
+    Write-MtLog ("FATAL: {0}" -f $e.ExceptionObject)
+})
+
+# ------------------------------------------------------------------ settings
+# Player tag and API token live in files outside the repository.
 $BaseInterval    = 60      # segundos
 $MaxIdleInterval = 180
 $IdleAfter       = 1800
 $CalibMinSamples = 5
 
-# Instancia unica. Rodar o atalho de novo nao deve criar um segundo coletor
-# (dois processos escrevendo no mesmo SQLite): a segunda execucao apenas
-# sinaliza a primeira para abrir o painel e encerra.
+# Single instance. Running the shortcut again must not create a second collector
+# writing to the same SQLite file: it signals the first one to open the panel.
 $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\MergeTacticsTracker')
 $script:ShowEvt = New-Object System.Threading.EventWaitHandle(
     $false, [System.Threading.EventResetMode]::AutoReset, 'Local\MergeTacticsShowPanel')
 if (-not $script:Mutex.WaitOne(0, $false)) {
-    # -Watchdog so confere se ha instancia viva; nunca abre o painel sozinho.
+    # -Watchdog only checks for a live instance; it never opens the panel.
     if (-not $Watchdog) { [void]$script:ShowEvt.Set() }
     exit 0
 }
-if ($Watchdog) { Write-MtLog 'vigia: nao havia instancia, subindo' }
+if ($Watchdog) { Write-MtLog 'watchdog: no instance found, starting' }
 
 $P = Get-MtPaths
 
-function Show-MtFaltando([string]$arquivo, [string]$comoObter) {
+function Show-MtMissingFile([string]$file, [string]$howTo) {
     Add-Type -AssemblyName System.Windows.Forms
     [void][System.Windows.Forms.MessageBox]::Show(
-        "Arquivo nao encontrado:`n$arquivo`n`n$comoObter",
+        "File not found:`n$file`n`n$howTo",
         'Merge Tactics tracker', 'OK', 'Warning')
 }
 
 if (-not (Test-Path $P.Token)) {
-    Show-MtFaltando $P.Token ("Crie o arquivo com o token da API do Clash Royale.`n" +
-        "Gere um em https://developer.clashroyale.com (o token e travado no seu IP).")
+    Show-MtMissingFile $P.Token ("Create it with your Clash Royale API token.`n" +
+        "Generate one at https://developer.clashroyale.com (the token is IP-locked).")
     exit 1
 }
 $Token = (Get-Content $P.Token -Raw).Trim()
 
 if (-not (Test-Path $P.Tag)) {
-    Show-MtFaltando $P.Tag ("Crie o arquivo com a tag do jogador, incluindo o #.`n" +
-        "Exemplo: #ABC123XYZ  (ela aparece no perfil dentro do jogo).")
+    Show-MtMissingFile $P.Tag ("Create it with your player tag, including the #.`n" +
+        "Example: #ABC123XYZ  (it is shown in your in-game profile).")
     exit 1
 }
 $PlayerTag = (Get-Content $P.Tag -Raw).Trim()
 if ($PlayerTag -notmatch '^#[0-9A-Za-z]+$') {
-    Show-MtFaltando $P.Tag "A tag lida foi '$PlayerTag'. Ela precisa comecar com # (exemplo: #ABC123XYZ)."
+    Show-MtMissingFile $P.Tag "Read '$PlayerTag'. The tag must start with # (example: #ABC123XYZ)."
     exit 1
 }
 
 $Db = Open-MtDb
 
-# idioma: o que ficou gravado, senao o do Windows
-$langSalvo = Get-MtState $Db 'lang'
-$script:MtLang = if ($langSalvo -in @('pt', 'en')) { $langSalvo } else { Get-MtSystemLang }
+# saved language, else the Windows one
+$savedLang = Get-MtState $Db 'lang'
+$script:MtLang = if ($savedLang -in @('pt', 'en')) { $savedLang } else { Get-MtSystemLang }
 
-# estado em memoria
+# in-memory state
 $S = [ordered]@{
     LastSeenTs     = 0
     LastSeenSid    = -1
@@ -85,8 +100,8 @@ $S = [ordered]@{
     NextPollAt     = 0
 }
 
-# NAO usar (Get-Date -UFormat %s): no PowerShell 5.1 ele devolve o epoch
-# deslocado pelo fuso local (3h atrasado aqui), corrompendo gaps e series.
+# NOT (Get-Date -UFormat %s): on PowerShell 5.1 it returns the epoch shifted by
+# the local time zone, which corrupts gaps and series.
 function Now-Unix { [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
 
 function Send-MtAlert([string]$Key, [string]$Title, [string]$Body) {
@@ -94,7 +109,7 @@ function Send-MtAlert([string]$Key, [string]$Title, [string]$Body) {
     Set-Content -Path $P.Alert -Value "[$(Get-Date -Format 'dd/MM HH:mm')] $Title`r`n$Body" -Encoding UTF8
     if ($S.AlertLast.ContainsKey($Key) -and ($now - $S.AlertLast[$Key]) -lt 3600) { return }
     $S.AlertLast[$Key] = $now
-    Write-MtLog "ALERTA: $Title - $Body"
+    Write-MtLog "ALERT: $Title - $Body"
     Show-MtToast $Title $Body
 }
 function Clear-MtAlert([string]$Key) {
@@ -102,10 +117,10 @@ function Clear-MtAlert([string]$Key) {
     if (Test-Path $P.Alert) { Remove-Item $P.Alert -ErrorAction SilentlyContinue }
 }
 
-# -------------------------------------------------------------------- calibragem
-# So afrouxa o intervalo depois que os dados provam qual e o menor espacamento
-# real entre partidas. Amostras colhidas em ritmo lento sao descartadas: o gap
-# delas e inflado pela propria amostragem e realimentaria a decisao.
+# --------------------------------------------------------------- calibration
+# The interval only loosens once the data proves the real minimum spacing
+# between matches. Samples taken at a slow pace are discarded: their gap is
+# inflated by the sampling itself and would feed back into the decision.
 function Get-MtSafeIdleInterval {
     $rows = Invoke-MtQuery $Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$BaseInterval ORDER BY ts"
     if ($rows.Count -lt $CalibMinSamples) { return $BaseInterval }
@@ -131,7 +146,7 @@ function Get-MtCertaintyThreshold {
     $BaseInterval * 3
 }
 
-# ------------------------------------------------------------------------ coleta
+# ------------------------------------------------------------------ collection
 function Invoke-MtPoll {
     if ($S.Paused) { return }
     $ts = Now-Unix
@@ -142,7 +157,7 @@ function Invoke-MtPoll {
         $code = $r.Status
         if ($code -eq 403) {
             Send-MtAlert 'auth' (L 'alert.auth') (L 'alert.auth.body')
-            Write-MtEvent $Db 'auth_error' '403 - provavel troca de IP (CIDR lock)'
+            Write-MtEvent $Db 'auth_error' '403 - likely IP change (CIDR lock)'
             return
         }
         if ($code -eq 429) { Write-MtEvent $Db 'rate_limit' '429'; return }
@@ -160,7 +175,7 @@ function Invoke-MtPoll {
     Clear-MtAlert 'auth'
     Clear-MtAlert 'offline'
 
-    # localiza a temporada de Merge Tactics dentro de progress
+    # find the Merge Tactics season inside progress
     $prog = $null
     if ($resp.ContainsKey('progress')) { $prog = $resp['progress'] }
     $seasonKey = $null
@@ -176,7 +191,7 @@ function Invoke-MtPoll {
         if ($S.MissingSeason -ge 10) {
             Send-MtAlert 'noseason' (L 'alert.noseason') (L 'alert.noseason.b')
         }
-        Write-MtEvent $Db 'no_season' 'nenhuma chave conhecida em progress'
+        Write-MtEvent $Db 'no_season' 'no known key in progress'
         return
     }
     $S.MissingSeason = 0
@@ -201,7 +216,7 @@ function Invoke-MtPoll {
     Set-MtState $Db 'last_poll' $ts
     Set-MtState $Db 'name'      ([string]$resp['name'])
 
-    # referencia do delta: memoria, ou ultimo snapshot apos reinicio
+    # delta reference: memory, or the last snapshot after a restart
     if ($S.LastSeenSid -eq $sid -and $S.LastSeenTs -gt 0) {
         $prevTs = $S.LastSeenTs; $prevTro = $S.LastSeenTro
     } else {
@@ -210,7 +225,7 @@ function Invoke-MtPoll {
             Invoke-MtExec $Db "INSERT OR REPLACE INTO snapshots (ts,season_id,trophies) VALUES ($ts,$sid,$trophies)"
             $S.LastSeenTs = $ts; $S.LastSeenSid = $sid; $S.LastSeenTro = $trophies
             $S.LastWritten = $ts; $S.LastChange = $ts
-            Write-MtLog "baseline ${seasonKey}: $trophies trofeus ($arena)"
+            Write-MtLog "baseline ${seasonKey}: $trophies trophies ($arena)"
             Write-MtEvent $Db 'baseline' "$seasonKey @ $trophies"
             return
         }
@@ -233,14 +248,14 @@ function Invoke-MtPoll {
                            " VALUES ($ts,$sid,$trophies,$delta,$gap,$certain,$($S.CurrentInterval))")
         $S.LastChange = $ts
         $sign = if ($delta -gt 0) { "+$delta" } else { "$delta" }
-        $pos = Get-MtPlacement $delta
-        Write-MtLog "PARTIDA $sign -> $trophies (${pos}o)"
-        Show-MtToast 'Merge Tactics' ((L 'toast.match') -f (Get-MtOrd $pos), $sign, $trophies, $arena)
+        $place = Get-MtPlacement $delta
+        Write-MtLog "MATCH $sign -> $trophies (place $place)"
+        Show-MtToast 'Merge Tactics' ((L 'toast.match') -f (Get-MtOrd $place), $sign, $trophies, $arena)
     }
 
     Update-MtTrayIcon
-    # O painel nao se atualizava sozinho: o cabecalho (trofeus, recorde,
-    # sequencia) ficava congelado no instante em que a janela foi aberta.
+    # The panel did not refresh itself: the header (trophies, best, streak)
+    # stayed frozen at the moment the window was opened.
     if ($delta -ne 0) { Update-MtPanelData $script:MtPeriod }
 }
 
@@ -250,18 +265,16 @@ function Get-MtInterval {
     $S.CurrentInterval
 }
 
-# ------------------------------------------------------------------ colocacao
-# A API nao devolve a posicao final da partida, so o saldo de trofeus. Mas os
-# saldos observados se agrupam em quatro faixas que nao se tocam, e cada faixa
-# e uma colocacao:
+# ------------------------------------------------------------------- placement
+# The API returns no final position, only the trophy delta. But the observed
+# deltas cluster into four bands that do not touch:
 #
-#     1o lugar  >= +18      2o lugar  +1 a +17
-#     3o lugar  -1 a -16    4o lugar  <= -17
+#     1st  >= +18      2nd  +1 to +17
+#     3rd  -1 to -16   4th  <= -17
 #
-# As fronteiras cairam em faixas vazias do historico real (nenhum saldo perto
-# de -16/-17 nem de +17/+18), entao a inferencia e estavel. Ainda assim e
-# inferencia: uma leitura marcada como nao confiavel pode somar dois jogos e
-# aterrissar na faixa errada.
+# The boundaries fell in empty stretches of the real history, so the inference is
+# stable. It is still inference: a reading flagged as spaced may cover two games
+# and land in the wrong band.
 $script:MtPlaceLabel = @('?', '1o', '2o', '3o', '4o')
 
 function Get-MtPlacement([int]$Delta) {
@@ -271,22 +284,20 @@ function Get-MtPlacement([int]$Delta) {
     4
 }
 
-# ------------------------------------------------------------------- consultas
-# Todas aceitam uma janela temporal ($since = 0 significa "tudo"), para que os
-# filtros do painel refiltrem os mesmos dados sem duplicar SQL.
+# --------------------------------------------------------------------- queries
+# All take a time window ($Since = 0 means everything), so the panel filters can
+# re-filter the same data without duplicating SQL.
 
 function Get-MtSummary([int]$Since = 0) {
-    # O valor atual e o do registro mais novo, venha ele de snapshots ou de
-    # matches. Olhar so snapshots deixava o cabecalho um passo atras quando a
-    # partida entrava primeiro.
+    # The current value is the newest record, from snapshots or matches. Reading
+    # snapshots alone left the header one step behind.
     $cur = Invoke-MtQuery $Db @"
 SELECT v FROM (SELECT ts, trophies AS v FROM snapshots
                UNION ALL SELECT ts, curr AS v FROM matches)
 ORDER BY ts DESC LIMIT 1
 "@
     $trophies = if ($cur.Count) { [int]$cur[0]['v'] } else { 0 }
-    # bestTrophies da API demora a virar; o maior valor ja visto localmente e a
-    # mais fresca das duas fontes, entao o recorde e o maximo entre elas.
+    # The API's bestTrophies lags, so the best is the max of the two sources.
     $pk = Invoke-MtQuery $Db @"
 SELECT IFNULL(MAX(v),0) m FROM (SELECT trophies AS v FROM snapshots
                                 UNION ALL SELECT curr AS v FROM matches)
@@ -300,7 +311,7 @@ SELECT IFNULL(MAX(v),0) m FROM (SELECT trophies AS v FROM snapshots
         Trophies = $trophies
         Total    = [int](Invoke-MtQuery $Db "SELECT COUNT(*) c FROM matches")[0]['c']
         Streak   = Get-MtStreak
-        Recordes = Get-MtStreaks $Since
+        Streaks = Get-MtStreaks $Since
     }
 }
 
@@ -323,9 +334,8 @@ FROM matches $w
     }
 }
 
-# Distribuicao das colocacoes inferidas no periodo. Devolve tambem a faixa de
-# saldo observada em cada posicao: e a prova visivel de que a inferencia bate
-# com os dados, e nao um chute.
+# Distribution of inferred placements, plus the observed delta range for each
+# position: visible evidence that the inference matches the data.
 function Get-MtPlacements([int]$Since = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $rows = Invoke-MtQuery $Db "SELECT delta, certain FROM matches $w"
@@ -333,14 +343,14 @@ function Get-MtPlacements([int]$Since = 0) {
     $lo  = @(0, 0, 0, 0, 0)
     $hi  = @(0, 0, 0, 0, 0)
     $seen = @($false, $false, $false, $false, $false)
-    $dub = 0
-    $soma = 0
+    $uncertain = 0
+    $sum = 0
     foreach ($r in $rows) {
         $d = [int]$r['delta']
         $p = Get-MtPlacement $d
         $cnt[$p]++
-        $soma += $p
-        if ([int]$r['certain'] -ne 1) { $dub++ }
+        $sum += $p
+        if ([int]$r['certain'] -ne 1) { $uncertain++ }
         if (-not $seen[$p]) { $seen[$p] = $true; $lo[$p] = $d; $hi[$p] = $d }
         else {
             if ($d -lt $lo[$p]) { $lo[$p] = $d }
@@ -362,8 +372,8 @@ function Get-MtPlacements([int]$Since = 0) {
     @{
         Rows    = $out
         Total   = $tot
-        Duvida  = $dub
-        Avg     = if ($tot) { [math]::Round($soma / $tot, 2) } else { 0 }
+        Uncertain  = $uncertain
+        Avg     = if ($tot) { [math]::Round($sum / $tot, 2) } else { 0 }
         Top2Pct = if ($tot) { [int][math]::Round(($cnt[1] + $cnt[2]) * 100 / $tot) } else { 0 }
     }
 }
@@ -376,9 +386,8 @@ UNION ALL
 SELECT ts, curr AS v FROM matches $w
 ORDER BY ts
 "@
-    # Colapsa repeticoes: o heartbeat horario grava o mesmo valor varias vezes
-    # e isso desenhava uma reta longa e falsa no fim da curva. O ultimo ponto
-    # e sempre mantido, para a curva chegar ao valor atual.
+    # Collapse repeats: the hourly heartbeat writes the same value many times,
+    # which drew a long false flat line. The last point is always kept.
     $out = @()
     $prev = $null
     $all = @($rows)
@@ -392,9 +401,8 @@ ORDER BY ts
     @($out)
 }
 
-# Sessoes de jogo: partidas separadas por menos de 30 min pertencem a mesma
-# sessao. E a unidade que o jogador realmente percebe ("hoje a noite joguei
-# mal"), e nenhuma tela do jogo mostra isso.
+# Play sessions: matches less than 30 min apart belong to the same session. That
+# is the unit a player actually feels, and no screen in the game shows it.
 function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $rows = (Invoke-MtQuery $Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts")
@@ -406,8 +414,8 @@ function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
         $ts = [int]$r['ts']; $d = [int]$r['delta']; $c = [int]$r['curr']
         $ct = [int]$r['certain']
         $pl = Get-MtPlacement $d
-        # cada sessao carrega as proprias partidas: a aba Sessoes abre a linha
-        # e mostra jogo a jogo, sem uma segunda consulta por clique.
+        # each session carries its own matches, so expanding a row needs no
+        # second query
         $m = [pscustomobject]@{ Ts = $ts; Delta = $d; Curr = $c; Certain = $ct; Place = $pl }
         if ($null -eq $cur -or ($ts - $cur.End) -gt $gap) {
             if ($cur) { $out += $cur }
@@ -435,8 +443,7 @@ function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
     @($out)
 }
 
-# Desempenho por hora do dia. Revela em que horario o jogador rende mais -
-# nenhuma outra fonte cruza isso.
+# Performance by hour of day. No other source crosses these two.
 function Get-MtByHour([int]$Since = 0) {
     $off = Get-MtTzOffset
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
@@ -461,7 +468,7 @@ FROM matches $w GROUP BY h ORDER BY h
     @($out)
 }
 
-# Desempenho por dia da semana.
+# Performance by weekday.
 function Get-MtByWeekday([int]$Since = 0) {
     $off = Get-MtTzOffset
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
@@ -472,52 +479,51 @@ FROM matches $w GROUP BY d ORDER BY d
 "@
     $map = @{}
     foreach ($r in $rows) { $map[[int]$r['d']] = [pscustomobject]@{ N = [int]$r['n']; Net = [int]$r['net'] } }
-    $nomes = @(0..6 | ForEach-Object { L "wd.$_" })
+    $names = @(0..6 | ForEach-Object { L "wd.$_" })
     $out = @()
     for ($d = 0; $d -lt 7; $d++) {
         if ($map.ContainsKey($d)) {
-            $out += [pscustomobject]@{ D = $nomes[$d]; N = $map[$d].N; Net = $map[$d].Net
+            $out += [pscustomobject]@{ D = $names[$d]; N = $map[$d].N; Net = $map[$d].Net
                                        Avg = [math]::Round($map[$d].Net / $map[$d].N, 1) }
         } else {
-            $out += [pscustomobject]@{ D = $nomes[$d]; N = 0; Net = 0; Avg = 0 }
+            $out += [pscustomobject]@{ D = $names[$d]; N = 0; Net = 0; Avg = 0 }
         }
     }
     , $out
 }
 
-# Exporta o historico completo para CSV, para analise fora do app.
+# Exports the full history to CSV, for analysis outside the app.
 function Export-MtCsv([string]$Path) {
     $off = Get-MtTzOffset
     $rows = (Invoke-MtQuery $Db @"
-SELECT ts, datetime(ts + $off, 'unixepoch') AS quando, delta, curr, gap_s, certain, sample_s
+SELECT ts, datetime(ts + $off, 'unixepoch') AS local_time, delta, curr, gap_s, certain, sample_s
 FROM matches ORDER BY ts
 "@)
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine('timestamp,quando,delta,trofeus,colocacao,gap_s,confiavel,intervalo_s')
+    [void]$sb.AppendLine('timestamp,local_time,delta,trophies,place,gap_s,reliable,interval_s')
     foreach ($r in $rows) {
-        $pos = Get-MtPlacement ([int]$r['delta'])
-        [void]$sb.AppendLine("$($r['ts']),$($r['quando']),$($r['delta']),$($r['curr']),$pos,$($r['gap_s']),$($r['certain']),$($r['sample_s'])")
+        $place = Get-MtPlacement ([int]$r['delta'])
+        [void]$sb.AppendLine("$($r['ts']),$($r['local_time']),$($r['delta']),$($r['curr']),$place,$($r['gap_s']),$($r['certain']),$($r['sample_s'])")
     }
     [System.IO.File]::WriteAllText($Path, $sb.ToString(), (New-Object System.Text.UTF8Encoding $true))
     $rows.Count
 }
 
-# Maior sequencia de vitorias e maior de quedas dentro do periodo. A sequencia
-# atual (Get-MtStreak) responde "como estou agora"; estas duas respondem "ate
-# onde ja foi", que e o numero que o jogador lembra.
+# Longest win and loss streaks in the period. Get-MtStreak answers "how am I
+# doing now"; these two answer "how far did it ever go".
 function Get-MtStreaks([int]$Since = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $rows = Invoke-MtQuery $Db "SELECT delta FROM matches $w ORDER BY ts"
-    $maxV = 0; $maxQ = 0; $v = 0; $q = 0
+    $maxWin = 0; $maxLoss = 0; $v = 0; $q = 0
     foreach ($r in $rows) {
         if ([int]$r['delta'] -gt 0) { $v++; $q = 0 } else { $q++; $v = 0 }
-        if ($v -gt $maxV) { $maxV = $v }
-        if ($q -gt $maxQ) { $maxQ = $q }
+        if ($v -gt $maxWin) { $maxWin = $v }
+        if ($q -gt $maxLoss) { $maxLoss = $q }
     }
-    @{ Vitorias = $maxV; Quedas = $maxQ }
+    @{ Wins = $maxWin; Losses = $maxLoss }
 }
 
-# Sequencia atual de resultados do mesmo sinal.
+# Current run of same-signed results.
 function Get-MtStreak {
     $rows = Invoke-MtQuery $Db "SELECT delta FROM matches ORDER BY ts DESC LIMIT 40"
     $all = @($rows)
@@ -532,10 +538,9 @@ function Get-MtStreak {
     @{ N = $n; Up = $up }
 }
 
-# O winsqlite3.dll do Windows NAO implementa o modificador 'localtime' das
-# funcoes de data (retorna string vazia). Por isso o offset do fuso e somado
-# ao timestamp antes de formatar. O Brasil nao usa horario de verao desde
-# 2019, entao um offset fixo e correto aqui.
+# Windows' winsqlite3.dll does NOT implement the 'localtime' modifier of the
+# date functions (it returns an empty string), so the zone offset is added to the
+# timestamp before formatting.
 function Get-MtTzOffset {
     [int][System.TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalSeconds
 }
@@ -568,7 +573,7 @@ FROM matches $w GROUP BY wk ORDER BY wk DESC LIMIT $Max
     @($out)
 }
 
-# $Limit = 0 devolve o historico inteiro (a aba Partidas rola por tudo).
+# $Limit = 0 returns the whole history (the Matches tab scrolls through it).
 function Get-MtRecent([int]$Since = 0, [int]$Limit = 5) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $lim = if ($Limit -gt 0) { "LIMIT $Limit" } else { "" }
@@ -583,7 +588,7 @@ function Get-MtRecent([int]$Since = 0, [int]$Limit = 5) {
     })
 }
 
-# ============================================================== interface grafica
+# =================================================================== interface
 . (Join-Path $Root 'MtUi.ps1')
 
 function New-MtTrayIcon([int]$Trophies) {
@@ -591,8 +596,7 @@ function New-MtTrayIcon([int]$Trophies) {
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.Clear([System.Drawing.Color]::Transparent)
     $g.SmoothingMode = 'AntiAlias'
-    # disco dourado com o numero em azul-noite: legivel a 16px e coerente
-    # com a identidade do jogo
+    # gold disc with the number in night blue: readable at 16px
     $br = New-Object System.Drawing.SolidBrush $script:T.Gold
     $g.FillEllipse($br, 0, 0, 15, 15)
     $rim = New-Object System.Drawing.Pen $script:T.BgDeep, 1
@@ -618,8 +622,7 @@ function Update-MtTrayIcon {
     $script:Tray.Text = $tip
 }
 
-# cabecalho: trofeus em destaque, arena como pilula, recorde ao lado
-# cabecalho: trofeus em destaque, arena como pilula dourada, recorde ao lado
+# Header: trophies, arena pill, season best and the streaks.
 function New-MtHeader($summary, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -654,23 +657,22 @@ function New-MtHeader($summary, [int]$w, [int]$h) {
         $g.DrawString($d.Arena, $fa, $agb, (New-Object System.Drawing.RectangleF $x, 12, $aw, 26), $sf)
         $fa.Dispose(); $agb.Dispose(); $ap.Dispose()
 
-        # Recorde: dourado quando voce esta nele agora, com a distancia
-        # quando esta abaixo. Antes era so um numero fixo, sem leitura.
-        $noTopo = ([int]$d.Trophies -ge [int]$d.Best)
-        $fm = New-MtFont 8.5 $(if ($noTopo) { 'Bold' } else { 'Regular' })
-        $bm = New-Object System.Drawing.SolidBrush $(if ($noTopo) { $script:T.Gold } else { $script:T.Faint })
-        $rtxt = if ($noTopo) { (L 'hdr.record.at') -f $d.Best }
+        # Gold when you are on the record now, with the distance when below.
+        $atBest = ([int]$d.Trophies -ge [int]$d.Best)
+        $fm = New-MtFont 8.5 $(if ($atBest) { 'Bold' } else { 'Regular' })
+        $bm = New-Object System.Drawing.SolidBrush $(if ($atBest) { $script:T.Gold } else { $script:T.Faint })
+        $recordText = if ($atBest) { (L 'hdr.record.at') -f $d.Best }
                 else { (L 'hdr.record.below') -f $d.Best, ([int]$d.Trophies - [int]$d.Best) }
-        $g.DrawString($rtxt, $fm, $bm, 36, 45)
+        $g.DrawString($recordText, $fm, $bm, 36, 45)
         $fm.Dispose(); $bm.Dispose()
 
         $fq = New-MtFont 8.5
         $bq = New-Object System.Drawing.SolidBrush $script:T.Faint
-        $g.DrawString(((L 'hdr.streaks') -f $d.Recordes.Vitorias, $d.Recordes.Quedas),
+        $g.DrawString(((L 'hdr.streaks') -f $d.Streaks.Wins, $d.Streaks.Losses),
                       $fq, $bq, 36, 60)
         $fq.Dispose(); $bq.Dispose()
 
-        # sequencia atual, quando houver
+        # current streak, when there is one
         if ($d.Streak -and $d.Streak.N -gt 1) {
             $sc = if ($d.Streak.Up) { $script:T.Up } else { $script:T.Down }
             $stxt = (L $(if ($d.Streak.Up) { 'hdr.streak.up' } else { 'hdr.streak.down' })) -f $d.Streak.N
@@ -693,7 +695,7 @@ function New-MtHeader($summary, [int]$w, [int]$h) {
 }
 
 function Show-MtPanel {
-    try { Show-MtPanelCore } catch { Write-MtLog "erro ao abrir painel: $_" }
+    try { Show-MtPanelCore } catch { Write-MtLog "failed to open panel: $_" }
 }
 
 function Invoke-MtExport {
@@ -701,23 +703,23 @@ function Invoke-MtExport {
         $dest = Join-Path ([Environment]::GetFolderPath('Desktop')) 'merge-tactics.csv'
         $n = Export-MtCsv $dest
         Show-MtToast 'Merge Tactics' ((L 'toast.export.ok') -f $n)
-        Write-MtLog "exportado: $n partidas -> $dest"
+        Write-MtLog "exported: $n matches -> $dest"
     } catch {
-        Write-MtLog "falha ao exportar: $_"
+        Write-MtLog "export failed: $_"
         Show-MtToast 'Merge Tactics' (L 'toast.export.err')
     }
 }
 
-# Periodos do filtro. Since = 0 significa "todo o historico".
+# Filter periods. Secs = 0 means the whole history.
 $script:MtPeriods = @(
-    @{ Key = '24h'; Chave = 'per.24h'; Secs = 86400 }
-    @{ Key = '7d';  Chave = 'per.7d';  Secs = 604800 }
-    @{ Key = '30d'; Chave = 'per.30d'; Secs = 2592000 }
-    @{ Key = 'all'; Chave = 'per.all'; Secs = 0 }
+    @{ Key = '24h'; LabelKey = 'per.24h'; Secs = 86400 }
+    @{ Key = '7d';  LabelKey = 'per.7d';  Secs = 604800 }
+    @{ Key = '30d'; LabelKey = 'per.30d'; Secs = 2592000 }
+    @{ Key = 'all'; LabelKey = 'per.all'; Secs = 0 }
 )
-# os rotulos sao resolvidos na abertura do painel, ja no idioma corrente
+# labels resolve when the panel opens, in the current language
 function Get-MtPeriodOptions {
-    @($script:MtPeriods | ForEach-Object { @{ Key = $_.Key; Label = (L $_.Chave); Secs = $_.Secs } })
+    @($script:MtPeriods | ForEach-Object { @{ Key = $_.Key; Label = (L $_.LabelKey); Secs = $_.Secs } })
 }
 $script:MtPeriod = 'all'
 $script:MtPeriodAnterior = 'all'
@@ -729,7 +731,7 @@ function Get-MtSince([string]$key) {
     (Now-Unix) - $p.Secs
 }
 
-# Recalcula todos os blocos para o periodo escolhido e repinta.
+# Recomputes every block for the chosen period and repaints.
 function Update-MtPanelData([string]$periodKey) {
     if (-not $script:Panel -or $script:Panel.IsDisposed) { return }
     $script:MtPeriod = $periodKey
@@ -745,8 +747,8 @@ function Update-MtPanelData([string]$periodKey) {
     $c.Cards[3].Tag.Value = "$([math]::Round($st.Place, 1))"
     foreach ($card in $c.Cards) { $card.Invalidate() }
 
-    # O cabecalho tem os numeros que mais mudam (trofeus atuais, recorde,
-    # sequencia) e nao estava na lista de blocos repintados.
+    # The header holds the numbers that change most and was not in the list of
+    # repainted blocks.
     $c.Header.Tag = Get-MtSummary $since
     $c.Header.Invalidate()
 
@@ -757,24 +759,38 @@ function Update-MtPanelData([string]$periodKey) {
     $c.Places.Tag = Get-MtPlacements $since
     $c.Places.Invalidate()
 
-    # A repintagem tambem acontece sozinha quando entra uma partida nova. Zerar
-    # Scroll aqui arrancaria a lista debaixo de quem estivesse lendo o
-    # historico; a posicao so volta ao topo quando o proprio periodo muda.
+    # A repaint also happens on its own when a new match arrives. Zeroing Scroll
+    # here would yank the list from under whoever is reading the history, so the
+    # position only returns to the top when the period itself changes.
     $reset = ($periodKey -ne $script:MtPeriodAnterior)
     $script:MtPeriodAnterior = $periodKey
-    $rolagem = { param($ctl) if ($reset) { 0 } else { [int]$ctl.Tag.Scroll } }
+    $keepScroll = { param($ctl) if ($reset) { 0 } else { [int]$ctl.Tag.Scroll } }
 
     $c.List.Tag = @{ Rows = (Get-MtRecent $since 4); Scroll = 0; MaxScroll = 0
-                     Titulo = 'sec.recent' }
+                     Title = 'sec.recent' }
     $c.List.Invalidate()
-    $c.Full.Tag = @{ Rows = (Get-MtRecent $since 0); Scroll = (& $rolagem $c.Full)
+    $c.Full.Tag = @{ Rows = (Get-MtRecent $since 0); Scroll = (& $keepScroll $c.Full)
                      MaxScroll = [int]$c.Full.Tag.MaxScroll
-                     Titulo = 'sec.history' }
+                     Title = 'sec.history' }
     $c.Full.Invalidate()
-    $c.Sessions.Tag = @{ Rows = (Get-MtSessions $since); Scroll = (& $rolagem $c.Sessions)
+    # The expanded session is found again by start time, not by index: when a new
+    # session appears on top the indices slide and the open row would jump.
+    $expandedTs = 0
+    if (-not $reset) {
+        $prevRows = @($c.Sessions.Tag.Rows)
+        $prevIdx = [int]$c.Sessions.Tag.Expanded
+        if ($prevIdx -ge 0 -and $prevIdx -lt $prevRows.Count) { $expandedTs = [int]$prevRows[$prevIdx].Start }
+    }
+    $sessions = @(Get-MtSessions $since)
+    $expanded = -1
+    if ($expandedTs) {
+        for ($k = 0; $k -lt $sessions.Count; $k++) {
+            if ([int]$sessions[$k].Start -eq $expandedTs) { $expanded = $k; break }
+        }
+    }
+    $c.Sessions.Tag = @{ Rows = $sessions; Scroll = (& $keepScroll $c.Sessions)
                          MaxScroll = [int]$c.Sessions.Tag.MaxScroll
-                         Aberta = $(if ($reset) { -1 } else { [int]$c.Sessions.Tag.Aberta })
-                         Hits = @() }
+                         Expanded = $expanded; Hits = @() }
     $c.Sessions.Invalidate()
     $c.Hours.Tag = Get-MtByHour $since
     $c.Hours.Invalidate()
@@ -783,7 +799,7 @@ function Update-MtPanelData([string]$periodKey) {
     Update-MtFooter
 }
 
-# Alterna entre as abas mostrando/escondendo os blocos de cada uma.
+# Switches tabs by showing and hiding each one's blocks.
 function Set-MtTab([int]$index) {
     $script:MtTab = $index
     $c = $script:PanelParts
@@ -802,12 +818,12 @@ function Update-MtFooter {
     $when = if ($lp) { [DateTimeOffset]::FromUnixTimeSeconds([int]$lp).LocalDateTime.ToString('HH:mm:ss') } else { '-' }
     $tot = [int](Invoke-MtQuery $Db "SELECT COUNT(*) c FROM matches")[0]['c']
     $txt = (L 'ft.text') -f $when, $script:LastInterval, $tot
-    # Coleta parada e o unico defeito que invalida tudo que o painel mostra;
-    # ela precisa aparecer aqui, nao so num toast que ja passou.
-    $atraso = if ($lp) { (Now-Unix) - [int]$lp } else { 999999 }
-    if ($atraso -gt ($script:LastInterval * 4)) {
+    # Stopped collection is the one fault that invalidates everything the panel
+    # shows, so it belongs here and not only in a toast that already passed.
+    $age = if ($lp) { (Now-Unix) - [int]$lp } else { 999999 }
+    if ($age -gt ($script:LastInterval * 4)) {
         $script:PanelParts.Footer.ForeColor = $script:T.Down
-        $txt = ((L 'ft.stopped') -f [int]($atraso / 60)) + $txt
+        $txt = ((L 'ft.stopped') -f [int]($age / 60)) + $txt
     } else {
         $script:PanelParts.Footer.ForeColor = $script:T.Faint
     }
@@ -833,7 +849,7 @@ function Show-MtPanelCore {
     $f.StartPosition = 'CenterScreen'
     $f.BackColor = $script:T.Bg
     $f.Add_FormClosing({ param($src, $e)
-        # fechar esconde: o app segue coletando na bandeja
+        # closing hides: the app keeps collecting in the tray
         if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $src.Hide() } })
 
     [void](Add-MtTitleBar $f "$($s.Name)   $PlayerTag")
@@ -885,13 +901,13 @@ function Show-MtPanelCore {
     $list.Location = New-Object System.Drawing.Point 26, 610
     $f.Controls.Add($list)
 
-    # aba Partidas: o historico inteiro, rolavel
+    # Matches tab: the whole history, scrollable
     $full = New-MtMatchList (Get-MtRecent $since 0) 868 584 'sec.history'
     $full.Location = New-Object System.Drawing.Point 26, 196
     $full.Visible = $false
     $f.Controls.Add($full)
 
-    # aba Sessoes e aba Horarios ocupam a mesma area dos blocos da visao geral
+    # the Sessions and Hours tabs occupy the same area as the Overview blocks
     $sessions = New-MtSessionList (Get-MtSessions $since) 868 584
     $sessions.Location = New-Object System.Drawing.Point 26, 196
     $sessions.Visible = $false
@@ -930,16 +946,16 @@ function Show-MtPanelCore {
         Sessions = $sessions; Hours = $hours; Wdays = $wdays; Tabs = $tabs
     }
 
-    # WM_MOUSEWHEEL vai para o controle com foco. Panel nao e selecionavel, entao
-    # o handler MouseWheel de cada lista nunca disparava e nada rolava. O Form
-    # recebe a mensagem e reencaminha para o bloco que estiver sob o cursor.
+    # WM_MOUSEWHEEL goes to the focused control and a Panel is not selectable, so
+    # each list's own MouseWheel handler never fired. The Form forwards it to the
+    # block under the cursor.
     $f.Add_MouseWheel({
         param($src, $e)
         $pt = $src.PointToClient([System.Windows.Forms.Cursor]::Position)
         $ctl = $src.GetChildAtPoint($pt)
         if ($ctl) { Invoke-MtScroll $ctl $e.Delta }
     })
-    # Esc fecha (sem encerrar a coleta), F5 recarrega, Ctrl+E exporta
+    # Esc hides (collection keeps running), F5 reloads, Ctrl+E exports
     $f.KeyPreview = $true
     $f.Add_KeyDown({
         param($src, $e)
@@ -947,7 +963,7 @@ function Show-MtPanelCore {
         if ($e.KeyCode -eq 'F5') { Update-MtPanelData $script:MtPeriod; return }
         if ($e.Control -and $e.KeyCode -eq 'E') { Invoke-MtExport; return }
         if ($e.Control -and $e.KeyCode -eq 'L') { Set-MtLang $(if ($script:MtLang -eq 'pt') { 'en' } else { 'pt' }); return }
-        # 1..4 trocam de aba sem tirar a mao do teclado
+        # 1..4 switch tabs
         $n = switch ($e.KeyCode) { 'D1' { 0 } 'D2' { 1 } 'D3' { 2 } 'D4' { 3 } default { -1 } }
         if ($n -ge 0) { Set-MtTab $n }
     })
@@ -959,7 +975,7 @@ function Show-MtPanelCore {
     $f.Activate()
 }
 
-# ------------------------------------------------------------------------ bandeja
+# ------------------------------------------------------------------------- tray
 $script:Panel = $null
 $script:PanelParts = $null
 $script:LastInterval = $BaseInterval
@@ -968,37 +984,36 @@ $script:Tray.Icon = New-MtTrayIcon 0
 $script:Tray.Text = 'Merge Tactics'
 $script:Tray.Visible = $true
 
-# Troca de idioma: o painel e reconstruido porque rotulos de card, aba e filtro
-# sao gravados no controle na criacao, nao lidos a cada repintura.
+# Language switch rebuilds the panel: card, tab and filter labels are baked into
+# the control at creation, not read on every repaint.
 function Rebuild-MtPanel {
     if (-not $script:Panel -or $script:Panel.IsDisposed) { return }
-    $visivel = $script:Panel.Visible
-    $velho = $script:Panel
+    $wasVisible = $script:Panel.Visible
+    $old = $script:Panel
     $script:Panel = $null
     $script:PanelParts = $null
-    $velho.Dispose()
-    if ($visivel) { Show-MtPanel }
+    $old.Dispose()
+    if ($wasVisible) { Show-MtPanel }
 }
 
 function Set-MtLang([string]$lang) {
     if ($lang -eq $script:MtLang) { return }
     $script:MtLang = $lang
     Set-MtState $Db 'lang' $lang
-    Write-MtLog "idioma: $lang"
+    Write-MtLog "language: $lang"
     Update-MtMenuText
     Update-MtTrayIcon
-    # A reconstrucao nao pode rodar dentro do handler que a disparou: o form
-    # estaria se descartando no meio do proprio evento de teclado, e o proximo
-    # Ctrl+L caia no vazio. Um timer de 1ms joga a troca para o tick seguinte
-    # do message loop, ja fora do handler.
+    # The rebuild cannot run inside the handler that triggered it: the form would
+    # dispose itself mid-event and the next Ctrl+L fell through. A 1ms timer moves
+    # the switch to the next message-loop tick.
     if ($script:Panel -and -not $script:Panel.IsDisposed) {
-        $adiar = New-Object System.Windows.Forms.Timer
-        $adiar.Interval = 1
-        $adiar.Add_Tick({
+        $defer = New-Object System.Windows.Forms.Timer
+        $defer.Interval = 1
+        $defer.Add_Tick({
             $this.Stop(); $this.Dispose()
-            try { Rebuild-MtPanel } catch { Write-MtLog "erro ao trocar idioma: $_" }
+            try { Rebuild-MtPanel } catch { Write-MtLog "language switch failed: $_" }
         })
-        $adiar.Start()
+        $defer.Start()
     }
 }
 
@@ -1036,29 +1051,29 @@ $miExit.Add_Click({
 $script:Tray.ContextMenuStrip = $menu
 $script:Tray.Add_MouseDoubleClick({ Show-MtPanel })
 
-# timer de coleta: dispara a cada 5s e decide se ja e hora de ler
+# collection timer: ticks every 5s and decides whether it is time to read
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $timer.Add_Tick({
   try {
-    if ($script:ShowEvt.WaitOne(0, $false)) { Write-MtLog 'pedido de abrir painel recebido'; Show-MtPanel }
+    if ($script:ShowEvt.WaitOne(0, $false)) { Write-MtLog 'show-panel request received'; Show-MtPanel }
     $now = Now-Unix
     if ($now -ge $S.NextPollAt) {
-        try { Invoke-MtPoll } catch { Write-MtLog "erro no poll: $_ (linha $($_.InvocationInfo.ScriptLineNumber))" }
+        try { Invoke-MtPoll } catch { Write-MtLog "poll error: $_ (line $($_.InvocationInfo.ScriptLineNumber))" }
         $script:LastInterval = Get-MtInterval
         $S.NextPollAt = (Now-Unix) + $script:LastInterval
     }
   } catch {
-    # Sem este catch a excecao sobe pelo message loop e mata o processo em
-    # silencio -- foi assim que ele sumiu em 28/08 as 10:19, sem log.
-    Write-MtLog "erro no tick: $_ (linha $($_.InvocationInfo.ScriptLineNumber))"
+    # Without this catch the exception climbs the message loop and kills the
+    # process silently, leaving nothing in the log.
+    Write-MtLog "tick error: $_ (line $($_.InvocationInfo.ScriptLineNumber))"
     $S.NextPollAt = (Now-Unix) + $BaseInterval
   }
 })
 $timer.Start()
 
-Write-MtLog "app iniciado - tag $PlayerTag"
-try { Invoke-MtPoll } catch { Write-MtLog "erro no poll inicial: $_" }
+Write-MtLog "app started - tag $PlayerTag"
+try { Invoke-MtPoll } catch { Write-MtLog "initial poll error: $_" }
 $S.NextPollAt = (Now-Unix) + (Get-MtInterval)
 Update-MtTrayIcon
 
@@ -1067,8 +1082,8 @@ if (-not $Hidden -and -not $Watchdog) { Show-MtPanel }
 try {
     [System.Windows.Forms.Application]::Run()
 } catch {
-    Write-MtLog "MORTE: $_ (linha $($_.InvocationInfo.ScriptLineNumber))"
+    Write-MtLog "DIED: $_ (line $($_.InvocationInfo.ScriptLineNumber))"
     throw
 } finally {
-    Write-MtLog 'app encerrado'
+    Write-MtLog 'app stopped'
 }

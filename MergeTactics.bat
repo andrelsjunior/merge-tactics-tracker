@@ -1,3 +1,3 @@
-@echo off
-rem Inicia o app; se ja estiver rodando, abre o painel da instancia existente.
-start "" wscript.exe "%~dp0Iniciar.vbs"
+@echo off
+rem Starts the app; if already running, opens the existing instance's panel.
+start "" wscript.exe "%~dp0Start.vbs"

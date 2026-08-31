@@ -1,6 +1,5 @@
-﻿# MtLib.ps1 - camada de dados do Merge Tactics tracker.
-# Usa o SQLite que ja vem no Windows (System32\winsqlite3.dll) via P/Invoke.
-# Nenhuma instalacao ou dependencia externa.
+﻿# MtLib.ps1 - data layer: SQLite, network, alerts, log.
+# Uses the winsqlite3.dll that ships with Windows, via P/Invoke. No dependencies.
 
 Add-Type -TypeDefinition @"
 using System;
@@ -74,7 +73,7 @@ function Get-MtPaths {
     }
 }
 
-# Escapa aspas simples para interpolacao segura em SQL.
+# Escapes single quotes for safe SQL interpolation.
 function ConvertTo-SqlText([string]$s) {
     if ($null -eq $s) { return 'NULL' }
     "'" + ($s -replace "'", "''") + "'"
@@ -106,17 +105,13 @@ function Open-MtDb {
 
 function Invoke-MtExec($db, [string]$sql)  { [MtSq]::Exec($db, $sql) }
 
-# Devolve SEMPRE um array (Dictionary[]), inclusive vazio ou de um elemento.
-#
-# Regra de uso: NAO envolver a chamada em @(). A virgula do return ja garante
-# o array; um @() por fora reembrulha e o foreach passa a iterar a lista em
-# vez das linhas. Atribua a uma variavel e use direto:
-#     $rows = Invoke-MtQuery $Db "..."   # ja e array
-#     $rows.Count ; $rows[0]['coluna'] ; foreach ($r in $rows) { ... }
+# Always returns an array, empty or single-element included.
+# Do NOT wrap the call in @(): that re-wraps the array and foreach then iterates
+# the list instead of the rows. Assign and use directly.
 function Invoke-MtQuery($db, [string]$sql) {
     $list = [MtSq]::Query($db, $sql)
-    # A virgula impede o PowerShell de desembrulhar o array no pipeline:
-    # sem ela, um resultado vazio chegaria como $null no chamador.
+    # The comma stops PowerShell from unrolling the array: without it an empty
+    # result would reach the caller as $null.
     if ($list.Count -eq 0) { return , @() }
     , $list.ToArray()
 }
@@ -172,7 +167,7 @@ function Write-MtLog([string]$msg) {
     $line = "[{0}] {1}" -f (Get-Date -Format 'dd/MM HH:mm:ss'), $msg
     try {
         Add-Content -Path $p.Log -Value $line -Encoding UTF8
-        # mantem o log enxuto
+        # keep the log small
         $fi = Get-Item $p.Log -ErrorAction SilentlyContinue
         if ($fi -and $fi.Length -gt 512KB) {
             (Get-Content $p.Log -Tail 500) | Set-Content $p.Log -Encoding UTF8
@@ -180,10 +175,10 @@ function Write-MtLog([string]$msg) {
     } catch { }
 }
 
-# ---------------------------------------------------------------------- rede
-# Nao usar Invoke-RestMethod: o ConvertFrom-Json do PowerShell 5.1 rejeita a
-# chave vazia ("") que a API devolve dentro de `progress`, e o Invoke-RestMethod
-# tambem nao negocia gzip (45 KB por leitura em vez de 9 KB).
+# ------------------------------------------------------------------- network
+# Not Invoke-RestMethod: ConvertFrom-Json on PowerShell 5.1 rejects the empty
+# key ("") the API returns inside `progress`, and it does not negotiate gzip
+# (45 KB per read instead of 9 KB).
 Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
 
 function Invoke-MtApi {

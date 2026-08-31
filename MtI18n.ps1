@@ -1,13 +1,8 @@
-﻿# MtI18n.ps1 - textos da interface em portugues e ingles.
-#
-# Uma chave por texto, duas tabelas. L() devolve o texto do idioma corrente e
-# cai no portugues quando a chave falta no ingles (nunca some texto da tela).
-# Os textos com numero usam -f: L 'chave' -f $valor.
-#
-# Trocar de idioma reconstroi o painel: rotulos de card, aba e filtro sao
-# gravados no controle na criacao, nao lidos a cada repintura.
+﻿# MtI18n.ps1 - interface strings, English and Portuguese.
+# L() returns the current language and falls back to English, so no text can
+# vanish from the screen. Strings with numbers use -f: (L 'key') -f $value.
 
-$script:MtLang = 'pt'
+$script:MtLang = 'en'
 
 $script:MtStrings = @{
 
@@ -63,7 +58,7 @@ $script:MtStrings = @{
         'ss.short'          = 'sessão curta'
         'ss.match.1'        = '1 partida'
         'ss.match.n'        = '{0} partidas'
-        'ss.avg'            = 'média {0}'  # posição média, uma casa
+        'ss.avg'            = 'média {0}'
         'ss.count'          = '{0} sessões'
         'ss.count.scroll'   = '{0} sessões  ·  role com a roda do mouse'
 
@@ -194,16 +189,16 @@ $script:MtStrings = @{
     }
 }
 
-# Texto do idioma corrente. Cai no portugues se a chave faltar no ingles.
+# Current-language text, falling back to English.
 function L([string]$k) {
     $t = $script:MtStrings[$script:MtLang]
     if ($t -and $t.ContainsKey($k)) { return $t[$k] }
-    $pt = $script:MtStrings['pt']
-    if ($pt.ContainsKey($k)) { return $pt[$k] }
+    $en = $script:MtStrings['en']
+    if ($en.ContainsKey($k)) { return $en[$k] }
     $k
 }
 
-# Ordinal da colocacao: 1o..4o em portugues, 1st..4th em ingles.
+# Placement ordinal: 1st..4th in English, 1o..4o in Portuguese.
 function Get-MtOrd([int]$n) {
     if ($script:MtLang -eq 'en') {
         switch ($n) { 1 { '1st' } 2 { '2nd' } 3 { '3rd' } default { "${n}th" } }
@@ -212,7 +207,7 @@ function Get-MtOrd([int]$n) {
     }
 }
 
-# Idioma inicial: segue o Windows, com ingles como padrao fora do portugues.
+# Initial language follows Windows, defaulting to English.
 function Get-MtSystemLang {
     if ([System.Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'pt') { 'pt' } else { 'en' }
 }
