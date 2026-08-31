@@ -99,6 +99,9 @@ sobrevive ao reinício.
     Ctrl+L     troca o idioma (português / inglês)
     Ctrl+E     exporta o histórico para merge-tactics.csv na área de trabalho
 
+Minimizar manda a janela para a bandeja, não para a barra de tarefas. O menu da
+bandeja desliga isso se você preferir o botão na barra.
+
 Colunas do CSV: `timestamp, local_time, delta, trophies, place, gap_s, reliable,
 interval_s` — o bastante para refazer a análise fora do app.
 
@@ -156,6 +159,7 @@ processo sem escrever nada no log. Toda saída agora loga (`app encerrado` /
     Uninstall.ps1      remove as tarefas, preserva os dados
     Status.ps1         está coletando?
     Stop.ps1           encerra o coletor
+    Test.ps1           confere as consultas e pinta cada bloco fora da tela
     mt.db              banco             (não versionado)
     token.txt          credencial da API (não versionada)
     tag.txt            tag do jogador    (não versionada)
@@ -163,6 +167,17 @@ processo sem escrever nada no log. Toda saída agora loga (`app encerrado` /
 
 Os `.ps1` são gravados em **UTF-8 com BOM**. Sem o BOM, o PowerShell 5.1 lê o
 arquivo como ANSI e corrompe todos os acentos da interface.
+
+## Desempenho
+
+O painel recalcula só a aba que está à vista; as outras são preenchidas quando
+abertas. O gráfico de troféus é reduzido à largura em que é desenhado, mantendo
+as pontas e os picos. Com uma temporada de histórico (5.000 partidas), uma
+partida registrada custa 77 ms de trabalho em vez de 1,2 s, e nenhuma interação
+passa de ~70 ms.
+
+O `Test.ps1` cobre a camada de consultas e pinta cada bloco, com dados e com
+período vazio, nos dois idiomas.
 
 ## Licença
 

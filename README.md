@@ -89,6 +89,9 @@ Ctrl+L     switch language (English / Portuguese)
 Ctrl+E     export the history to merge-tactics.csv on the desktop
 ```
 
+Minimising sends the window to the tray rather than the taskbar. The tray menu
+turns that off if you prefer a taskbar button.
+
 CSV columns: `timestamp, local_time, delta, trophies, place, gap_s, reliable,
 interval_s` — enough to redo the analysis elsewhere.
 
@@ -129,6 +132,7 @@ Install.ps1        registers both scheduled tasks
 Uninstall.ps1      removes them, keeps the data
 Status.ps1         is it collecting?
 Stop.ps1           stops the collector
+Test.ps1           checks the queries and paints every block off-screen
 mt.db              database        (not versioned)
 token.txt          API credential  (not versioned)
 tag.txt            player tag      (not versioned)
@@ -139,6 +143,16 @@ The `.ps1` files are stored as **UTF-8 with BOM**. Without the BOM, PowerShell
 5.1 reads them as ANSI and mangles every accented character in the interface.
 
 Portuguese documentation: [README.pt-BR.md](README.pt-BR.md).
+
+## Performance
+
+The panel recomputes only the tab in view; the others are filled in when opened.
+The trophy chart is reduced to the width it is drawn at, keeping the ends and the
+peaks. With a season of history (5.000 matches) a recorded match costs 77 ms of
+work instead of 1.2 s, and no interaction exceeds ~70 ms.
+
+`Test.ps1` covers the query layer and paints every block, with data and with an
+empty period, in both languages.
 
 ## License
 

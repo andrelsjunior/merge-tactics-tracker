@@ -800,12 +800,12 @@ function New-MtTabs($labels, [int]$selected, [scriptblock]$onChange, [int]$w, [i
 # ------------------------------------------------------------------ session list
 # Clicking a row expands the session into its individual matches. Without that
 # the tab only said "you played badly last night" without showing where.
-function New-MtSessionList($rows, [int]$w, [int]$h) {
+function New-MtSessionList($rows, [int]$w, [int]$h, [scriptblock]$fetch = $null) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
     $p.Cursor = 'Hand'
-    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Expanded = -1; Hits = @() }
+    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Expanded = -1; Hits = @(); Fetch = $fetch }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -850,7 +850,7 @@ function New-MtSessionList($rows, [int]$w, [int]$h) {
         for ($i = $start; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             $expanded = ($i -eq [int]$st.Expanded)
-            $nm = if ($expanded) { @($r.Matches).Count } else { 0 }
+            $nm = if ($expanded) { $r.N } else { 0 }
             $blockH = $rh + ($nm * $matchH) + $(if ($expanded) { 8 } else { 0 })
             if ($y + $rh -gt $limitY) { break }
 
@@ -928,6 +928,10 @@ function New-MtSessionList($rows, [int]$w, [int]$h) {
             $y += $rh
 
             if ($expanded) {
+                # fetched on expand, then kept on the row until the data is rebuilt
+                if ($null -eq $r.Matches -and $st.ContainsKey('Fetch') -and $st.Fetch) {
+                    $r.Matches = & $st.Fetch $r.Start $r.End
+                }
                 $sep = New-Object System.Drawing.Pen $script:T.Border, 1
                 $g.DrawLine($sep, 30, ($y - 3), ($W - 30), ($y - 3)); $sep.Dispose()
                 foreach ($m in @($r.Matches)) {
@@ -1253,7 +1257,10 @@ function Add-MtTitleBar($form, [string]$title) {
             $s.BackColor = $script:T.Surface; $s.ForeColor = $script:T.Dim })
         $b.Add_Click({ param($s, $e)
             $frm = $s.FindForm()
-            if ($s.Tag -eq 'close') { $frm.Hide() } else { $frm.WindowState = 'Minimized' } })
+            if ($s.Tag -eq 'close') { $frm.Hide(); return }
+            # With the option on, minimising goes straight to the tray instead of
+            # leaving a taskbar button for a window that lives in the tray anyway.
+            if ($script:MtToTray) { $frm.Hide() } else { $frm.WindowState = 'Minimized' } })
         $bar.Controls.Add($b)
         $b.Left = $bar.Width + $spec.X
         $b.Top = 11
