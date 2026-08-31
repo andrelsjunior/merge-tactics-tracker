@@ -1146,6 +1146,66 @@ function New-MtWeekdayChart($days, [int]$w, [int]$h) {
     $p
 }
 
+# ------------------------------------------------------------- language toggle
+# Two segments, the active one lit. Ctrl+L and the tray menu do the same thing,
+# but neither is visible: a switch nobody can find is a switch nobody uses.
+function New-MtLangToggle([scriptblock]$onChange, [int]$w = 58, [int]$h = 24) {
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Size = New-Object System.Drawing.Size $w, $h
+    $p.BackColor = $script:T.Surface
+    $p.Cursor = 'Hand'
+    $p.Tag = @{ OnChange = $onChange; Hot = -1 }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = 'AntiAlias'
+        $g.TextRenderingHint = 'ClearTypeGridFit'
+        $W = $s.Width; $H = $s.Height
+        $d = $s.Tag
+        $path = New-MtRoundPath 0.5 0.5 ($W - 1) ($H - 1) ($H / 2)
+        $bg = New-Object System.Drawing.SolidBrush $script:T.BgDeep
+        $g.FillPath($bg, $path); $bg.Dispose()
+        $pen = New-Object System.Drawing.Pen $script:T.Border, 1
+        $g.DrawPath($pen, $path); $pen.Dispose(); $path.Dispose()
+
+        $f = New-MtFont 8 'Bold'
+        $sf = New-Object System.Drawing.StringFormat
+        $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
+        $half = $W / 2
+        for ($i = 0; $i -lt 2; $i++) {
+            $code = @('PT', 'EN')[$i]
+            $on = ($script:MtLang -eq @('pt', 'en')[$i])
+            $x = 2 + $i * ($half - 2)
+            if ($on) {
+                $sp = New-MtRoundPath $x 2 ($half - 2) ($H - 4) (($H - 4) / 2)
+                $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+                    (New-Object System.Drawing.Point 0, 2),
+                    (New-Object System.Drawing.Point 0, ($H - 2)),
+                    $script:T.Royal, $script:T.BorderLit)
+                $g.FillPath($grad, $sp); $grad.Dispose(); $sp.Dispose()
+            }
+            $tc = if ($on) { [System.Drawing.Color]::White }
+                  elseif ($d.Hot -eq $i) { $script:T.Text } else { $script:T.Faint }
+            $tb = New-Object System.Drawing.SolidBrush $tc
+            $g.DrawString($code, $f, $tb, (New-Object System.Drawing.RectangleF $x, 2, ($half - 2), ($H - 4)), $sf)
+            $tb.Dispose()
+        }
+        $f.Dispose()
+    })
+    $p.Add_MouseMove({
+        param($s, $e)
+        $hot = if ($e.X -lt ($s.Width / 2)) { 0 } else { 1 }
+        if ($hot -ne $s.Tag.Hot) { $s.Tag.Hot = $hot; $s.Invalidate() }
+    })
+    $p.Add_MouseLeave({ param($s, $e) $s.Tag.Hot = -1; $s.Invalidate() })
+    $p.Add_MouseClick({
+        param($s, $e)
+        $lang = if ($e.X -lt ($s.Width / 2)) { 'pt' } else { 'en' }
+        & $s.Tag.OnChange $lang
+    })
+    $p
+}
+
 # --------------------------------------------------------------- own title bar
 function Add-MtTitleBar($form, [string]$title) {
     $bar = New-Object System.Windows.Forms.Panel
@@ -1199,5 +1259,13 @@ function Add-MtTitleBar($form, [string]$title) {
         $b.Top = 11
         $b.BringToFront()
     }
+
+    $lang = New-MtLangToggle { param($l) Set-MtLang $l }
+    $lang.Anchor = 'Top,Right'
+    $bar.Controls.Add($lang)
+    $lang.Left = $bar.Width - 200
+    $lang.Top = 12
+    $lang.BringToFront()
+
     $bar
 }

@@ -87,9 +87,9 @@ os blocos de uma vez.
 ## Português e inglês
 
 A interface vem nos dois idiomas. Ela segue o idioma do Windows na primeira
-execução, e dá para trocar a qualquer momento com **Ctrl+L** no painel, ou pelo
-menu da bandeja (botão direito no ícone, depois *Switch to English* / *Mudar
-para português*). A escolha fica gravada e sobrevive ao reinício.
+execução, e dá para trocar a qualquer momento pelo botão **PT | EN** na barra
+de título, por **Ctrl+L**, ou pelo menu da bandeja. A escolha fica gravada e
+sobrevive ao reinício.
 
 ## Atalhos e exportação
 
