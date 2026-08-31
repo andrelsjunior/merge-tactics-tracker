@@ -1,0 +1,15 @@
+# credenciais e identidade — NUNCA versionar
+token.txt
+tag.txt
+
+# dados e estado locais
+mt.db
+mt.db-journal
+mt.db.*
+tracker.log
+ALERTA.txt
+merge-tactics.csv
+
+# backups locais
+bak-*/
+*.bak
