@@ -44,6 +44,14 @@ $script:MtPlaceC = @(
 # panel's own MouseWheel event never fires. The Form receives the message and
 # calls this for the block under the cursor. Each block publishes MaxScroll
 # during its own Paint, which is when it knows how many rows fit.
+# @($null) is a one-element array holding $null, so a block whose data came back
+# empty walked past its own guard and dereferenced that null. This returns an
+# array that is actually empty.
+function AsMtArray($value) {
+    if ($null -eq $value) { return , @() }
+    , @($value)
+}
+
 function Invoke-MtScroll($panel, [int]$delta, [int]$step = 2) {
     if (-not $panel) { return }
     $st = $panel.Tag
@@ -322,7 +330,7 @@ function New-MtAreaChart($series, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = @{ Data = @($series); Hover = -1; Pts = @() }
+    $p.Tag = @{ Data = (AsMtArray $series); Hover = -1; Pts = @() }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -336,7 +344,7 @@ function New-MtAreaChart($series, [int]$w, [int]$h) {
         Draw-MtSectionTitle $g 'trophy' (L 'sec.chart') 18 15
 
         $st = $s.Tag
-        $data = @($st.Data)
+        $data = AsMtArray $st.Data
         $f = New-MtFont 8
         $bd = New-Object System.Drawing.SolidBrush $script:T.Faint
         if ($data.Count -lt 2) {
@@ -490,7 +498,7 @@ function New-MtPlacementChart($pack, [int]$w, [int]$h) {
         if ([int]$pack.Uncertain -gt 0) { $sub += (L 'pl.sub.doubt') -f $pack.Uncertain }
         $g.DrawString($sub, $fsm, $bd, 18, 34)
 
-        $rows  = @($pack.Rows)
+        $rows  = AsMtArray $pack.Rows
         $mx    = 1
         foreach ($r in $rows) { if ($r.N -gt $mx) { $mx = $r.N } }
         $barX  = 46
@@ -550,7 +558,7 @@ function New-MtBars($data, [int]$w, [int]$h, [string]$titleKey, [string]$icon = 
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = @{ Data = @($data); Caption = $titleKey; Icon = $icon }
+    $p.Tag = @{ Data = (AsMtArray $data); Caption = $titleKey; Icon = $icon }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -563,7 +571,7 @@ function New-MtBars($data, [int]$w, [int]$h, [string]$titleKey, [string]$icon = 
         $pack = $s.Tag
         Draw-MtSectionTitle $g $pack.Icon (L $pack.Caption) 18 15
 
-        $data = @($pack.Data)
+        $data = AsMtArray $pack.Data
         $f = New-MtFont 8
         $fb = New-MtFont 8.5 'Bold'
         $bd = New-Object System.Drawing.SolidBrush $script:T.Faint
@@ -628,7 +636,7 @@ function New-MtMatchList($rows, [int]$w, [int]$h, [string]$titleKey = 'sec.recen
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Title = $titleKey }
+    $p.Tag = @{ Rows = (AsMtArray $rows); Scroll = 0; MaxScroll = 0; Title = $titleKey }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -642,7 +650,7 @@ function New-MtMatchList($rows, [int]$w, [int]$h, [string]$titleKey = 'sec.recen
         $st = $s.Tag
         Draw-MtSectionTitle $g 'swords' (L $st.Title) 18 15
 
-        $rows = @($st.Rows)
+        $rows = AsMtArray $st.Rows
         $f = New-MtFont 9
         $fsm = New-MtFont 8
         $fb = New-MtFont 9.5 'Bold'
@@ -805,7 +813,7 @@ function New-MtSessionList($rows, [int]$w, [int]$h, [scriptblock]$fetch = $null)
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
     $p.Cursor = 'Hand'
-    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Expanded = -1; Hits = @(); Fetch = $fetch }
+    $p.Tag = @{ Rows = (AsMtArray $rows); Scroll = 0; MaxScroll = 0; Expanded = -1; Hits = @(); Fetch = $fetch }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -826,7 +834,7 @@ function New-MtSessionList($rows, [int]$w, [int]$h, [scriptblock]$fetch = $null)
         $btx  = New-Object System.Drawing.SolidBrush $script:T.Text
 
         $st = $s.Tag
-        $rows = @($st.Rows)
+        $rows = AsMtArray $st.Rows
         if ($rows.Count -eq 0) {
             $st.MaxScroll = 0; $st.Hits = @()
             $g.DrawString((L 'empty.sessions'), $f, $bd, 18, 46)
@@ -934,7 +942,7 @@ function New-MtSessionList($rows, [int]$w, [int]$h, [scriptblock]$fetch = $null)
                 }
                 $sep = New-Object System.Drawing.Pen $script:T.Border, 1
                 $g.DrawLine($sep, 30, ($y - 3), ($W - 30), ($y - 3)); $sep.Dispose()
-                foreach ($m in @($r.Matches)) {
+                foreach ($m in (AsMtArray $r.Matches)) {
                     if ($y + $matchH -gt $limitY) { break }
                     $mw = [DateTimeOffset]::FromUnixTimeSeconds($m.Ts).LocalDateTime.ToString('HH:mm')
                     $g.DrawString($mw, $fsm, $bd, 44, ($y + 5))
@@ -990,7 +998,7 @@ function New-MtHourChart($hours, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = @($hours)
+    $p.Tag = AsMtArray $hours
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -1007,7 +1015,7 @@ function New-MtHourChart($hours, [int]$w, [int]$h) {
         $g.DrawString((L 'ch.hours.legend'), $fleg, $bleg, 250, 17)
         $fleg.Dispose(); $bleg.Dispose()
 
-        $data = @($s.Tag)
+        $data = AsMtArray $s.Tag
         $f = New-MtFont 7.5
         $fb = New-MtFont 8 'Bold'
         $bd = New-Object System.Drawing.SolidBrush $script:T.Faint
@@ -1072,7 +1080,7 @@ function New-MtWeekdayChart($days, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = $days
+    $p.Tag = AsMtArray $days
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -1089,7 +1097,7 @@ function New-MtWeekdayChart($days, [int]$w, [int]$h) {
         $g.DrawString((L 'ch.week.legend'), $fleg, $bleg, 258, 17)
         $fleg.Dispose(); $bleg.Dispose()
 
-        $data = $s.Tag
+        $data = AsMtArray $s.Tag
         $f = New-MtFont 8.5
         $fb = New-MtFont 9 'Bold'
         $bd = New-Object System.Drawing.SolidBrush $script:T.Faint

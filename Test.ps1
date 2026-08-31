@@ -30,11 +30,37 @@ $script:MtPeriods = @(
     @{ Key = 'all'; LabelKey = 'per.all'; Secs = 0 }
 )
 $script:Failed = 0
+# WinForms swallows an exception thrown inside Paint (Control.PaintWithErrorHandling)
+# and raises a dialog instead of letting it propagate, so a try/catch around
+# DrawToBitmap sees nothing and the check passes while the block is broken.
+# This handler intercepts it, and Paint below turns it into a failure.
+$script:PaintErrors = New-Object 'System.Collections.Generic.List[string]'
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($src, $e)
+    $ex = $e.Exception
+    $where = '?'
+    if ($ex.PSObject.Properties['ErrorRecord'] -and $ex.ErrorRecord) {
+        $where = ($ex.ErrorRecord.ScriptStackTrace -split "`n" | Select-Object -First 2) -join ' <- '
+    }
+    $script:PaintErrors.Add(("{0} | {1}" -f $ex.Message, $where))
+})
 function Check([string]$name, [scriptblock]$body) {
     try {
         if (& $body) { Write-Host "  ok    $name" }
         else { Write-Host "  FAIL  $name"; $script:Failed++ }
     } catch { Write-Host "  ERROR $name :: $_"; $script:Failed++ }
+}
+function Paint([scriptblock]$make) {
+    $script:PaintErrors.Clear()
+    $p = & $make
+    $bmp = New-Object System.Drawing.Bitmap $p.Width, $p.Height
+    $p.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $p.Width, $p.Height))
+    $bmp.Dispose(); $p.Dispose()
+    if ($script:PaintErrors.Count) {
+        foreach ($m in $script:PaintErrors) { Write-Host "        $m" }
+        return $false
+    }
+    $true
 }
 $total = [int](Invoke-MtQuery $script:Db 'SELECT COUNT(*) c FROM matches')[0]['c']
 Write-Host "database: $total matches"
@@ -63,6 +89,7 @@ Check 'placements add up to the match count' {
 }
 Check 'sessions cover every match exactly once' {
     $ss = @(Get-MtSessions 0)
+    if (-not $ss.Count) { return ($total -eq 0) }
     (($ss | Measure-Object -Property N -Sum).Sum -eq $total) -and
     (@($ss | Where-Object { ($_.P[1] + $_.P[2] + $_.P[3] + $_.P[4]) -ne $_.N }).Count -eq 0)
 }
@@ -101,6 +128,41 @@ Check 'the CSV carries one line per match plus a header' {
     ($n -eq $total) -and ($lines.Count -eq $total + 1) -and ($lines[0] -like 'timestamp,local_time,*')
 }
 
+Check 'a database with no rows at all survives every query' {
+    # the first run: the schema exists, the first poll has not landed yet
+    $tmp = Join-Path $env:TEMP ('mt-fresh-' + [guid]::NewGuid().ToString('N') + '.db')
+    $fresh = [MtSq]::OpenDb($tmp)
+    foreach ($stmt in ($script:MtSchema -split ';')) { if ($stmt.Trim()) { [MtSq]::Exec($fresh, $stmt.Trim()) } }
+    $keep = $script:Db
+    $script:Db = $fresh
+    $script:MinGap = @{ Ts = -1; Value = 0; N = 0 }
+    try {
+        $s = Get-MtSummary 0
+        $ok = ($s.Trophies -eq 0) -and ($s.Total -eq 0) -and ($s.Best -eq 0) -and
+              ((Get-MtStats 0).N -eq 0) -and ((Get-MtPlacements 0).Total -eq 0) -and
+              (@(Get-MtSeries 0 900).Count -eq 0) -and (@(Get-MtSessions 0).Count -eq 0) -and
+              (@(Get-MtRecent 0 0).Count -eq 0) -and (@(Get-MtDaily 0 14).Count -eq 0) -and
+              (@(Get-MtByHour 0).Count -eq 24) -and (@(Get-MtByWeekday 0).Count -eq 7) -and
+              ((Get-MtSafeIdleInterval) -eq $script:BaseInterval) -and
+              ((Get-MtStreaks 0).Wins -eq 0)
+        # and every block must paint against it
+        foreach ($make in @(
+            { New-MtAreaChart (Get-MtSeries 0 900) 868 214 },
+            { New-MtPlacementChart (Get-MtPlacements 0) 422 176 },
+            { New-MtMatchList (Get-MtRecent 0 0) 868 584 'sec.history' },
+            { New-MtSessionList (Get-MtSessions 0) 868 584 { param($a,$b) Get-MtSessionMatches $a $b } },
+            { New-MtHeader (Get-MtSummary 0) 440 82 })) {
+            $null = Paint $make
+        }
+        $ok
+    } finally {
+        $script:Db = $keep
+        $script:MinGap = @{ Ts = -1; Value = 0; N = 0 }
+        [MtSq]::CloseDb($fresh)
+        Remove-Item $tmp -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host "`nscope: a handler must not be able to shadow the app state"
 Check 'every script-scope read is qualified' {
     $src = Get-Content "$Root\MergeTactics.ps1" -Raw
@@ -113,6 +175,34 @@ Check 'every script-scope read is qualified' {
 Check 'no one-letter names hold state' {
     $src = Get-Content "$Root\MergeTactics.ps1" -Raw
     (-not ($src -cmatch '(?<![:\w])\$S\.')) -and (-not ($src -cmatch '(?<![:\w])\$P\.'))
+}
+
+Check 'the weekday query yields seven rows through @(), like the others' {
+    (@(Get-MtByWeekday 0).Count -eq 7) -and (@(Get-MtByHour 0).Count -eq 24)
+}
+Check 'an empty result never becomes a phantom row' {
+    # @($null) is a one-element array holding $null; a block would walk past its
+    # own guard and dereference it
+    # assigned, the way the blocks use it
+    $vazio = AsMtArray $null
+    $tres  = AsMtArray @(1, 2, 3)
+    $um    = AsMtArray 7
+    ($vazio.Count -eq 0) -and ($tres.Count -eq 3) -and ($um.Count -eq 1) -and
+    ((@($null)).Count -eq 1)   # a armadilha que isso evita
+}
+Check 'every block stores its rows through AsMtArray' {
+    $src = Get-Content "$Root\MtUi.ps1" -Raw
+    $bad = @([regex]::Matches($src, '\$p\.Tag = .*@\((\$series|\$data|\$rows|\$hours)\)'))
+    if ($bad.Count) { foreach ($m in $bad) { Write-Host "        $($m.Value)" } }
+    $bad.Count -eq 0
+}
+Check 'no query function returns through a leading comma' {
+    # a comma stops the unwrap: @(Get-MtX) becomes one item and an empty result
+    # becomes one phantom row
+    $src = Get-Content "$Root\MergeTactics.ps1" -Raw
+    $bad = @([regex]::Matches($src, '(?m)^\s+, \$'))
+    if ($bad.Count) { Write-Host "        $($bad.Count) found" }
+    $bad.Count -eq 0
 }
 
 Write-Host "`nstrings"
@@ -146,12 +236,6 @@ Check 'placeholders match between languages' {
 
 Write-Host "`npainting, with data and with none, in both languages"
 $future = [int](Invoke-MtQuery $script:Db 'SELECT IFNULL(MAX(ts),0)+1 m FROM matches')[0]['m']
-function Paint([scriptblock]$make) {
-    $p = & $make
-    $bmp = New-Object System.Drawing.Bitmap $p.Width, $p.Height
-    $p.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $p.Width, $p.Height))
-    $bmp.Dispose(); $p.Dispose(); $true
-}
 foreach ($lang in @('en', 'pt')) {
     $script:MtLang = $lang
     foreach ($since in @(0, $future)) {
@@ -168,6 +252,7 @@ foreach ($lang in @('en', 'pt')) {
 }
 $script:MtLang = 'en'
 Check 'an expanded session paints its matches' {
+    if (-not @(Get-MtSessions 0).Count) { return $true }
     $p = New-MtSessionList (Get-MtSessions 0) 868 584 { param($a,$b) Get-MtSessionMatches $a $b }
     $p.Tag.Expanded = 0
     $bmp = New-Object System.Drawing.Bitmap $p.Width, $p.Height
