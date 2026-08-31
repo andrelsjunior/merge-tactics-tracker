@@ -542,7 +542,9 @@ FROM matches $w GROUP BY d ORDER BY d
             $out += [pscustomobject]@{ D = $names[$d]; N = 0; Net = 0; Avg = 0 }
         }
     }
-    , $out
+    # no leading comma: it would make @(Get-MtByWeekday) one item instead of seven,
+    # the way it does for every other query here
+    $out
 }
 
 # Exports the full history to CSV, for analysis outside the app.
