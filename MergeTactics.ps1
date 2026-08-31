@@ -7,9 +7,9 @@ param([switch]$Hidden, [switch]$Watchdog)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $Root 'MtLib.ps1')
-. (Join-Path $Root 'MtI18n.ps1')
+$script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $script:Root 'MtLib.ps1')
+. (Join-Path $script:Root 'MtI18n.ps1')
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -34,10 +34,10 @@ Add-Type -AssemblyName System.Drawing
 
 # ------------------------------------------------------------------ settings
 # Player tag and API token live in files outside the repository.
-$BaseInterval    = 60      # segundos
-$MaxIdleInterval = 180
-$IdleAfter       = 1800
-$CalibMinSamples = 5
+$script:BaseInterval    = 60      # segundos
+$script:MaxIdleInterval = 180
+$script:IdleAfter       = 1800
+$script:CalibMinSamples = 5
 
 # Single instance. Running the shortcut again must not create a second collector
 # writing to the same SQLite file: it signals the first one to open the panel.
@@ -51,7 +51,7 @@ if (-not $script:Mutex.WaitOne(0, $false)) {
 }
 if ($Watchdog) { Write-MtLog 'watchdog: no instance found, starting' }
 
-$P = Get-MtPaths
+$script:Paths = Get-MtPaths
 
 function Show-MtMissingFile([string]$file, [string]$howTo) {
     Add-Type -AssemblyName System.Windows.Forms
@@ -60,39 +60,41 @@ function Show-MtMissingFile([string]$file, [string]$howTo) {
         'Merge Tactics tracker', 'OK', 'Warning')
 }
 
-if (-not (Test-Path $P.Token)) {
-    Show-MtMissingFile $P.Token ("Create it with your Clash Royale API token.`n" +
+if (-not (Test-Path $script:Paths.Token)) {
+    Show-MtMissingFile $script:Paths.Token ("Create it with your Clash Royale API token.`n" +
         "Generate one at https://developer.clashroyale.com (the token is IP-locked).")
     exit 1
 }
-$Token = (Get-Content $P.Token -Raw).Trim()
+$script:Token = (Get-Content $script:Paths.Token -Raw).Trim()
 
-if (-not (Test-Path $P.Tag)) {
-    Show-MtMissingFile $P.Tag ("Create it with your player tag, including the #.`n" +
+if (-not (Test-Path $script:Paths.Tag)) {
+    Show-MtMissingFile $script:Paths.Tag ("Create it with your player tag, including the #.`n" +
         "Example: #ABC123XYZ  (it is shown in your in-game profile).")
     exit 1
 }
-$PlayerTag = (Get-Content $P.Tag -Raw).Trim()
-if ($PlayerTag -notmatch '^#[0-9A-Za-z]+$') {
-    Show-MtMissingFile $P.Tag "Read '$PlayerTag'. The tag must start with # (example: #ABC123XYZ)."
+$script:PlayerTag = (Get-Content $script:Paths.Tag -Raw).Trim()
+if ($script:PlayerTag -notmatch '^#[0-9A-Za-z]+$') {
+    Show-MtMissingFile $script:Paths.Tag "Read '$script:PlayerTag'. The tag must start with # (example: #ABC123XYZ)."
     exit 1
 }
 
-$Db = Open-MtDb
+$script:Db = Open-MtDb
 
 # saved language, else the Windows one
-$savedLang = Get-MtState $Db 'lang'
+$savedLang = Get-MtState $script:Db 'lang'
 $script:MtLang = if ($savedLang -in @('pt', 'en')) { $savedLang } else { Get-MtSystemLang }
 
-# in-memory state
-$S = [ordered]@{
+# In-memory state. Explicitly script-scoped, like every other value the
+# functions read: PowerShell resolves an unqualified name by walking the call
+# stack, so a handler's own $s would otherwise shadow it.
+$script:State = [ordered]@{
     LastSeenTs     = 0
     LastSeenSid    = -1
     LastSeenTro    = -1
     LastChange     = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     LastSuccess    = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     LastWritten    = 0
-    CurrentInterval= $BaseInterval
+    CurrentInterval= $script:BaseInterval
     Errors         = 0
     MissingSeason  = 0
     Paused         = $false
@@ -106,15 +108,15 @@ function Now-Unix { [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
 
 function Send-MtAlert([string]$Key, [string]$Title, [string]$Body) {
     $now = Now-Unix
-    Set-Content -Path $P.Alert -Value "[$(Get-Date -Format 'dd/MM HH:mm')] $Title`r`n$Body" -Encoding UTF8
-    if ($S.AlertLast.ContainsKey($Key) -and ($now - $S.AlertLast[$Key]) -lt 3600) { return }
-    $S.AlertLast[$Key] = $now
+    Set-Content -Path $script:Paths.Alert -Value "[$(Get-Date -Format 'dd/MM HH:mm')] $Title`r`n$Body" -Encoding UTF8
+    if ($script:State.AlertLast.ContainsKey($Key) -and ($now - $script:State.AlertLast[$Key]) -lt 3600) { return }
+    $script:State.AlertLast[$Key] = $now
     Write-MtLog "ALERT: $Title - $Body"
     Show-MtToast $Title $Body
 }
 function Clear-MtAlert([string]$Key) {
-    if ($S.AlertLast.ContainsKey($Key)) { $S.AlertLast.Remove($Key) }
-    if (Test-Path $P.Alert) { Remove-Item $P.Alert -ErrorAction SilentlyContinue }
+    if ($script:State.AlertLast.ContainsKey($Key)) { $script:State.AlertLast.Remove($Key) }
+    if (Test-Path $script:Paths.Alert) { Remove-Item $script:Paths.Alert -ErrorAction SilentlyContinue }
 }
 
 # --------------------------------------------------------------- calibration
@@ -122,20 +124,20 @@ function Clear-MtAlert([string]$Key) {
 # between matches. Samples taken at a slow pace are discarded: their gap is
 # inflated by the sampling itself and would feed back into the decision.
 function Get-MtSafeIdleInterval {
-    $rows = Invoke-MtQuery $Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$BaseInterval ORDER BY ts"
-    if ($rows.Count -lt $CalibMinSamples) { return $BaseInterval }
+    $rows = Invoke-MtQuery $script:Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$script:BaseInterval ORDER BY ts"
+    if ($rows.Count -lt $script:CalibMinSamples) { return $script:BaseInterval }
     $gaps = @()
     for ($i = 1; $i -lt $rows.Count; $i++) {
         $g = [int]$rows[$i]['ts'] - [int]$rows[$i-1]['ts']
         if ($g -gt 0 -and $g -le 3600) { $gaps += $g }
     }
-    if (-not $gaps.Count) { return $BaseInterval }
-    [Math]::Max($BaseInterval, [Math]::Min($MaxIdleInterval, [int]($gaps | Measure-Object -Minimum).Minimum / 2))
+    if (-not $gaps.Count) { return $script:BaseInterval }
+    [Math]::Max($script:BaseInterval, [Math]::Min($script:MaxIdleInterval, [int]($gaps | Measure-Object -Minimum).Minimum / 2))
 }
 function Get-MtCertaintyThreshold {
-    $n = [int](Invoke-MtQuery $Db "SELECT COUNT(*) c FROM matches WHERE certain=1 AND sample_s<=$BaseInterval")[0]['c']
-    if ($n -ge $CalibMinSamples) {
-        $rows = Invoke-MtQuery $Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$BaseInterval ORDER BY ts"
+    $n = [int](Invoke-MtQuery $script:Db "SELECT COUNT(*) c FROM matches WHERE certain=1 AND sample_s<=$script:BaseInterval")[0]['c']
+    if ($n -ge $script:CalibMinSamples) {
+        $rows = Invoke-MtQuery $script:Db "SELECT ts FROM matches WHERE certain=1 AND sample_s<=$script:BaseInterval ORDER BY ts"
         $gaps = @()
         for ($i = 1; $i -lt $rows.Count; $i++) {
             $g = [int]$rows[$i]['ts'] - [int]$rows[$i-1]['ts']
@@ -143,35 +145,35 @@ function Get-MtCertaintyThreshold {
         }
         if ($gaps.Count) { return ($gaps | Measure-Object -Minimum).Minimum }
     }
-    $BaseInterval * 3
+    $script:BaseInterval * 3
 }
 
 # ------------------------------------------------------------------ collection
 function Invoke-MtPoll {
-    if ($S.Paused) { return }
+    if ($script:State.Paused) { return }
     $ts = Now-Unix
-    $url = "https://api.clashroyale.com/v1/players/$($PlayerTag -replace '#','%23')"
+    $url = "https://api.clashroyale.com/v1/players/$($script:PlayerTag -replace '#','%23')"
 
-    $r = Invoke-MtApi -Url $url -Token $Token -TimeoutSec 20
+    $r = Invoke-MtApi -Url $url -Token $script:Token -TimeoutSec 20
     if ($r.Status -ne 200) {
         $code = $r.Status
         if ($code -eq 403) {
             Send-MtAlert 'auth' (L 'alert.auth') (L 'alert.auth.body')
-            Write-MtEvent $Db 'auth_error' '403 - likely IP change (CIDR lock)'
+            Write-MtEvent $script:Db 'auth_error' '403 - likely IP change (CIDR lock)'
             return
         }
-        if ($code -eq 429) { Write-MtEvent $Db 'rate_limit' '429'; return }
-        $S.Errors++
-        if (($ts - $S.LastSuccess) -gt 1800) {
-            Send-MtAlert 'offline' (L 'alert.off') ((L 'alert.off.body') -f $S.Errors)
+        if ($code -eq 429) { Write-MtEvent $script:Db 'rate_limit' '429'; return }
+        $script:State.Errors++
+        if (($ts - $script:State.LastSuccess) -gt 1800) {
+            Send-MtAlert 'offline' (L 'alert.off') ((L 'alert.off.body') -f $script:State.Errors)
         }
-        Write-MtEvent $Db 'net_error' "status=$code streak=$($S.Errors)"
+        Write-MtEvent $script:Db 'net_error' "status=$code streak=$($script:State.Errors)"
         return
     }
     $resp = $r.Data
 
-    $S.Errors = 0
-    $S.LastSuccess = $ts
+    $script:State.Errors = 0
+    $script:State.LastSuccess = $ts
     Clear-MtAlert 'auth'
     Clear-MtAlert 'offline'
 
@@ -187,66 +189,66 @@ function Invoke-MtPoll {
         }
     }
     if (-not $seasonKey) {
-        $S.MissingSeason++
-        if ($S.MissingSeason -ge 10) {
+        $script:State.MissingSeason++
+        if ($script:State.MissingSeason -ge 10) {
             Send-MtAlert 'noseason' (L 'alert.noseason') (L 'alert.noseason.b')
         }
-        Write-MtEvent $Db 'no_season' 'no known key in progress'
+        Write-MtEvent $script:Db 'no_season' 'no known key in progress'
         return
     }
-    $S.MissingSeason = 0
+    $script:State.MissingSeason = 0
 
     $node     = $prog[$seasonKey]
     $trophies = [int]$node['trophies']
     $best     = [int]$node['bestTrophies']
     $arena    = if ($node.ContainsKey('arena')) { [string]$node['arena']['name'] } else { $null }
-    $sid      = Get-MtSeasonId $Db $seasonKey
+    $sid      = Get-MtSeasonId $script:Db $seasonKey
 
-    $prevArena = Get-MtState $Db 'arena'
+    $prevArena = Get-MtState $script:Db 'arena'
     if ($prevArena -ne $arena) {
         if ($prevArena) {
             Write-MtLog "ARENA: $prevArena -> $arena"
-            Write-MtEvent $Db 'arena_change' "$prevArena -> $arena"
+            Write-MtEvent $script:Db 'arena_change' "$prevArena -> $arena"
             Show-MtToast (L 'toast.arena') ((L 'toast.arena.body') -f $arena, $trophies)
         }
-        Set-MtState $Db 'arena' $arena
+        Set-MtState $script:Db 'arena' $arena
     }
-    Set-MtState $Db 'best'      $best
-    Set-MtState $Db 'season'    $seasonKey
-    Set-MtState $Db 'last_poll' $ts
-    Set-MtState $Db 'name'      ([string]$resp['name'])
+    Set-MtState $script:Db 'best'      $best
+    Set-MtState $script:Db 'season'    $seasonKey
+    Set-MtState $script:Db 'last_poll' $ts
+    Set-MtState $script:Db 'name'      ([string]$resp['name'])
 
     # delta reference: memory, or the last snapshot after a restart
-    if ($S.LastSeenSid -eq $sid -and $S.LastSeenTs -gt 0) {
-        $prevTs = $S.LastSeenTs; $prevTro = $S.LastSeenTro
+    if ($script:State.LastSeenSid -eq $sid -and $script:State.LastSeenTs -gt 0) {
+        $prevTs = $script:State.LastSeenTs; $prevTro = $script:State.LastSeenTro
     } else {
-        $row = Invoke-MtQuery $Db "SELECT ts, trophies FROM snapshots WHERE season_id=$sid ORDER BY ts DESC LIMIT 1"
+        $row = Invoke-MtQuery $script:Db "SELECT ts, trophies FROM snapshots WHERE season_id=$sid ORDER BY ts DESC LIMIT 1"
         if (-not $row.Count) {
-            Invoke-MtExec $Db "INSERT OR REPLACE INTO snapshots (ts,season_id,trophies) VALUES ($ts,$sid,$trophies)"
-            $S.LastSeenTs = $ts; $S.LastSeenSid = $sid; $S.LastSeenTro = $trophies
-            $S.LastWritten = $ts; $S.LastChange = $ts
+            Invoke-MtExec $script:Db "INSERT OR REPLACE INTO snapshots (ts,season_id,trophies) VALUES ($ts,$sid,$trophies)"
+            $script:State.LastSeenTs = $ts; $script:State.LastSeenSid = $sid; $script:State.LastSeenTro = $trophies
+            $script:State.LastWritten = $ts; $script:State.LastChange = $ts
             Write-MtLog "baseline ${seasonKey}: $trophies trophies ($arena)"
-            Write-MtEvent $Db 'baseline' "$seasonKey @ $trophies"
+            Write-MtEvent $script:Db 'baseline' "$seasonKey @ $trophies"
             return
         }
         $prevTs = [int]$row[0]['ts']; $prevTro = [int]$row[0]['trophies']
-        if (-not $S.LastWritten) { $S.LastWritten = $prevTs }
+        if (-not $script:State.LastWritten) { $script:State.LastWritten = $prevTs }
     }
 
     $delta = $trophies - $prevTro
 
-    if ($delta -ne 0 -or ($ts - $S.LastWritten) -ge 3600) {
-        Invoke-MtExec $Db "INSERT OR REPLACE INTO snapshots (ts,season_id,trophies) VALUES ($ts,$sid,$trophies)"
-        $S.LastWritten = $ts
+    if ($delta -ne 0 -or ($ts - $script:State.LastWritten) -ge 3600) {
+        Invoke-MtExec $script:Db "INSERT OR REPLACE INTO snapshots (ts,season_id,trophies) VALUES ($ts,$sid,$trophies)"
+        $script:State.LastWritten = $ts
     }
-    $S.LastSeenTs = $ts; $S.LastSeenSid = $sid; $S.LastSeenTro = $trophies
+    $script:State.LastSeenTs = $ts; $script:State.LastSeenSid = $sid; $script:State.LastSeenTro = $trophies
 
     if ($delta -ne 0) {
         $gap = $ts - $prevTs
         $certain = if ($gap -le (Get-MtCertaintyThreshold)) { 1 } else { 0 }
-        Invoke-MtExec $Db ("INSERT OR REPLACE INTO matches (ts,season_id,curr,delta,gap_s,certain,sample_s)" +
-                           " VALUES ($ts,$sid,$trophies,$delta,$gap,$certain,$($S.CurrentInterval))")
-        $S.LastChange = $ts
+        Invoke-MtExec $script:Db ("INSERT OR REPLACE INTO matches (ts,season_id,curr,delta,gap_s,certain,sample_s)" +
+                           " VALUES ($ts,$sid,$trophies,$delta,$gap,$certain,$($script:State.CurrentInterval))")
+        $script:State.LastChange = $ts
         $sign = if ($delta -gt 0) { "+$delta" } else { "$delta" }
         $place = Get-MtPlacement $delta
         Write-MtLog "MATCH $sign -> $trophies (place $place)"
@@ -260,9 +262,9 @@ function Invoke-MtPoll {
 }
 
 function Get-MtInterval {
-    if ((Now-Unix) - $S.LastChange -gt $IdleAfter) { $S.CurrentInterval = Get-MtSafeIdleInterval }
-    else { $S.CurrentInterval = $BaseInterval }
-    $S.CurrentInterval
+    if ((Now-Unix) - $script:State.LastChange -gt $script:IdleAfter) { $script:State.CurrentInterval = Get-MtSafeIdleInterval }
+    else { $script:State.CurrentInterval = $script:BaseInterval }
+    $script:State.CurrentInterval
 }
 
 # ------------------------------------------------------------------- placement
@@ -291,25 +293,25 @@ function Get-MtPlacement([int]$Delta) {
 function Get-MtSummary([int]$Since = 0) {
     # The current value is the newest record, from snapshots or matches. Reading
     # snapshots alone left the header one step behind.
-    $cur = Invoke-MtQuery $Db @"
+    $cur = Invoke-MtQuery $script:Db @"
 SELECT v FROM (SELECT ts, trophies AS v FROM snapshots
                UNION ALL SELECT ts, curr AS v FROM matches)
 ORDER BY ts DESC LIMIT 1
 "@
     $trophies = if ($cur.Count) { [int]$cur[0]['v'] } else { 0 }
     # The API's bestTrophies lags, so the best is the max of the two sources.
-    $pk = Invoke-MtQuery $Db @"
+    $pk = Invoke-MtQuery $script:Db @"
 SELECT IFNULL(MAX(v),0) m FROM (SELECT trophies AS v FROM snapshots
                                 UNION ALL SELECT curr AS v FROM matches)
 "@
-    $bestApi = Get-MtState $Db 'best'
+    $bestApi = Get-MtState $script:Db 'best'
     $best = [Math]::Max($(if ($bestApi) { [int]$bestApi } else { 0 }), [int]$pk[0]['m'])
     [ordered]@{
-        Name     = (Get-MtState $Db 'name')
-        Arena    = (Get-MtState $Db 'arena')
+        Name     = (Get-MtState $script:Db 'name')
+        Arena    = (Get-MtState $script:Db 'arena')
         Best     = $best
         Trophies = $trophies
-        Total    = [int](Invoke-MtQuery $Db "SELECT COUNT(*) c FROM matches")[0]['c']
+        Total    = [int](Invoke-MtQuery $script:Db "SELECT COUNT(*) c FROM matches")[0]['c']
         Streak   = Get-MtStreak
         Streaks = Get-MtStreaks $Since
     }
@@ -317,7 +319,7 @@ SELECT IFNULL(MAX(v),0) m FROM (SELECT trophies AS v FROM snapshots
 
 function Get-MtStats([int]$Since = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $r = Invoke-MtQuery $Db @"
+    $r = Invoke-MtQuery $script:Db @"
 SELECT COUNT(*) n,
        IFNULL(SUM(delta),0) net,
        IFNULL(SUM(CASE WHEN delta > 0 THEN 1 ELSE 0 END),0) up
@@ -338,7 +340,7 @@ FROM matches $w
 # position: visible evidence that the inference matches the data.
 function Get-MtPlacements([int]$Since = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $Db "SELECT delta, certain FROM matches $w"
+    $rows = Invoke-MtQuery $script:Db "SELECT delta, certain FROM matches $w"
     $cnt = @(0, 0, 0, 0, 0)
     $lo  = @(0, 0, 0, 0, 0)
     $hi  = @(0, 0, 0, 0, 0)
@@ -380,7 +382,7 @@ function Get-MtPlacements([int]$Since = 0) {
 
 function Get-MtSeries([int]$Since = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $Db @"
+    $rows = Invoke-MtQuery $script:Db @"
 SELECT ts, trophies AS v FROM snapshots $w
 UNION ALL
 SELECT ts, curr AS v FROM matches $w
@@ -405,7 +407,7 @@ ORDER BY ts
 # is the unit a player actually feels, and no screen in the game shows it.
 function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = (Invoke-MtQuery $Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts")
+    $rows = (Invoke-MtQuery $script:Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts")
     if ($rows.Count -eq 0) { return @() }
     $gap = $GapMin * 60
     $out = @()
@@ -447,7 +449,7 @@ function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
 function Get-MtByHour([int]$Since = 0) {
     $off = Get-MtTzOffset
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = (Invoke-MtQuery $Db @"
+    $rows = (Invoke-MtQuery $script:Db @"
 SELECT CAST(strftime('%H', ts + $off, 'unixepoch') AS INTEGER) AS h,
        COUNT(*) AS n, SUM(delta) AS net
 FROM matches $w GROUP BY h ORDER BY h
@@ -472,7 +474,7 @@ FROM matches $w GROUP BY h ORDER BY h
 function Get-MtByWeekday([int]$Since = 0) {
     $off = Get-MtTzOffset
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $Db @"
+    $rows = Invoke-MtQuery $script:Db @"
 SELECT CAST(strftime('%w', ts + $off, 'unixepoch') AS INTEGER) AS d,
        COUNT(*) AS n, SUM(delta) AS net
 FROM matches $w GROUP BY d ORDER BY d
@@ -495,7 +497,7 @@ FROM matches $w GROUP BY d ORDER BY d
 # Exports the full history to CSV, for analysis outside the app.
 function Export-MtCsv([string]$Path) {
     $off = Get-MtTzOffset
-    $rows = (Invoke-MtQuery $Db @"
+    $rows = (Invoke-MtQuery $script:Db @"
 SELECT ts, datetime(ts + $off, 'unixepoch') AS local_time, delta, curr, gap_s, certain, sample_s
 FROM matches ORDER BY ts
 "@)
@@ -513,7 +515,7 @@ FROM matches ORDER BY ts
 # doing now"; these two answer "how far did it ever go".
 function Get-MtStreaks([int]$Since = 0) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $Db "SELECT delta FROM matches $w ORDER BY ts"
+    $rows = Invoke-MtQuery $script:Db "SELECT delta FROM matches $w ORDER BY ts"
     $maxWin = 0; $maxLoss = 0; $v = 0; $q = 0
     foreach ($r in $rows) {
         if ([int]$r['delta'] -gt 0) { $v++; $q = 0 } else { $q++; $v = 0 }
@@ -525,7 +527,7 @@ function Get-MtStreaks([int]$Since = 0) {
 
 # Current run of same-signed results.
 function Get-MtStreak {
-    $rows = Invoke-MtQuery $Db "SELECT delta FROM matches ORDER BY ts DESC LIMIT 40"
+    $rows = Invoke-MtQuery $script:Db "SELECT delta FROM matches ORDER BY ts DESC LIMIT 40"
     $all = @($rows)
     if ($all.Count -eq 0) { return @{ N = 0; Up = $true } }
     $up = ([int]$all[0]['delta'] -gt 0)
@@ -548,7 +550,7 @@ function Get-MtTzOffset {
 function Get-MtDaily([int]$Since = 0, [int]$Max = 14) {
     $off = Get-MtTzOffset
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $Db @"
+    $rows = Invoke-MtQuery $script:Db @"
 SELECT date(ts + $off, 'unixepoch') AS d, COUNT(*) AS n, SUM(delta) AS net
 FROM matches $w GROUP BY d ORDER BY d DESC LIMIT $Max
 "@
@@ -562,7 +564,7 @@ FROM matches $w GROUP BY d ORDER BY d DESC LIMIT $Max
 function Get-MtWeekly([int]$Since = 0, [int]$Max = 10) {
     $off = Get-MtTzOffset
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $Db @"
+    $rows = Invoke-MtQuery $script:Db @"
 SELECT strftime('%Y-W%W', ts + $off, 'unixepoch') AS wk, COUNT(*) AS n, SUM(delta) AS net
 FROM matches $w GROUP BY wk ORDER BY wk DESC LIMIT $Max
 "@
@@ -577,7 +579,7 @@ FROM matches $w GROUP BY wk ORDER BY wk DESC LIMIT $Max
 function Get-MtRecent([int]$Since = 0, [int]$Limit = 5) {
     $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
     $lim = if ($Limit -gt 0) { "LIMIT $Limit" } else { "" }
-    $rows = Invoke-MtQuery $Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts DESC $lim"
+    $rows = Invoke-MtQuery $script:Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts DESC $lim"
     @($rows | ForEach-Object {
         $d = [int]$_['delta']
         [pscustomobject]@{
@@ -589,7 +591,7 @@ function Get-MtRecent([int]$Since = 0, [int]$Limit = 5) {
 }
 
 # =================================================================== interface
-. (Join-Path $Root 'MtUi.ps1')
+. (Join-Path $script:Root 'MtUi.ps1')
 
 function New-MtTrayIcon([int]$Trophies) {
     $bmp = New-Object System.Drawing.Bitmap 16, 16
@@ -814,9 +816,9 @@ function Set-MtTab([int]$index) {
 
 function Update-MtFooter {
     if (-not $script:PanelParts -or -not $script:PanelParts.Footer) { return }
-    $lp = Get-MtState $Db 'last_poll'
+    $lp = Get-MtState $script:Db 'last_poll'
     $when = if ($lp) { [DateTimeOffset]::FromUnixTimeSeconds([int]$lp).LocalDateTime.ToString('HH:mm:ss') } else { '-' }
-    $tot = [int](Invoke-MtQuery $Db "SELECT COUNT(*) c FROM matches")[0]['c']
+    $tot = [int](Invoke-MtQuery $script:Db "SELECT COUNT(*) c FROM matches")[0]['c']
     $txt = (L 'ft.text') -f $when, $script:LastInterval, $tot
     # Stopped collection is the one fault that invalidates everything the panel
     # shows, so it belongs here and not only in a toast that already passed.
@@ -843,7 +845,7 @@ function Show-MtPanelCore {
     $st = Get-MtStats $since
 
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Merge Tactics - $($s.Name) $PlayerTag"
+    $f.Text = "Merge Tactics - $($s.Name) $script:PlayerTag"
     $f.FormBorderStyle = 'None'          # barra de titulo propria, tema escuro
     $f.Size = New-Object System.Drawing.Size 920, 812
     $f.StartPosition = 'CenterScreen'
@@ -852,7 +854,7 @@ function Show-MtPanelCore {
         # closing hides: the app keeps collecting in the tray
         if ($e.CloseReason -eq 'UserClosing') { $e.Cancel = $true; $src.Hide() } })
 
-    [void](Add-MtTitleBar $f "$($s.Name)   $PlayerTag")
+    [void](Add-MtTitleBar $f "$($s.Name)   $script:PlayerTag")
 
     $hdr = New-MtHeader $s 440 82
     $hdr.Location = New-Object System.Drawing.Point 26, 62
@@ -978,7 +980,7 @@ function Show-MtPanelCore {
 # ------------------------------------------------------------------------- tray
 $script:Panel = $null
 $script:PanelParts = $null
-$script:LastInterval = $BaseInterval
+$script:LastInterval = $script:BaseInterval
 $script:Tray = New-Object System.Windows.Forms.NotifyIcon
 $script:Tray.Icon = New-MtTrayIcon 0
 $script:Tray.Text = 'Merge Tactics'
@@ -999,7 +1001,7 @@ function Rebuild-MtPanel {
 function Set-MtLang([string]$lang) {
     if ($lang -eq $script:MtLang) { return }
     $script:MtLang = $lang
-    Set-MtState $Db 'lang' $lang
+    Set-MtState $script:Db 'lang' $lang
     Write-MtLog "language: $lang"
     Update-MtMenuText
     Update-MtTrayIcon
@@ -1018,33 +1020,33 @@ function Set-MtLang([string]$lang) {
 }
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
-$miOpen = $menu.Items.Add('');   $miOpen.Add_Click({ Show-MtPanel })
-$miNow  = $menu.Items.Add('');   $miNow.Add_Click({ Invoke-MtPoll })
-$miExp  = $menu.Items.Add('');   $miExp.Add_Click({ Invoke-MtExport })
-$miPause= $menu.Items.Add('')
-$miPause.Add_Click({
-    $S.Paused = -not $S.Paused
+$script:miOpen = $menu.Items.Add('');   $script:miOpen.Add_Click({ Show-MtPanel })
+$script:miNow  = $menu.Items.Add('');   $script:miNow.Add_Click({ Invoke-MtPoll })
+$script:miExp  = $menu.Items.Add('');   $script:miExp.Add_Click({ Invoke-MtExport })
+$script:miPause= $menu.Items.Add('')
+$script:miPause.Add_Click({
+    $script:State.Paused = -not $script:State.Paused
     Update-MtMenuText
 })
 [void]$menu.Items.Add('-')
-$miLang = $menu.Items.Add('')
-$miLang.Add_Click({ Set-MtLang $(if ($script:MtLang -eq 'pt') { 'en' } else { 'pt' }) })
+$script:miLang = $menu.Items.Add('')
+$script:miLang.Add_Click({ Set-MtLang $(if ($script:MtLang -eq 'pt') { 'en' } else { 'pt' }) })
 [void]$menu.Items.Add('-')
-$miExit = $menu.Items.Add('')
+$script:miExit = $menu.Items.Add('')
 
 function Update-MtMenuText {
-    $miOpen.Text  = L 'menu.open'
-    $miNow.Text   = L 'menu.now'
-    $miExp.Text   = L 'menu.export'
-    $miPause.Text = if ($S.Paused) { L 'menu.resume' } else { L 'menu.pause' }
-    $miLang.Text  = L 'menu.lang'
-    $miExit.Text  = L 'menu.quit'
+    $script:miOpen.Text  = L 'menu.open'
+    $script:miNow.Text   = L 'menu.now'
+    $script:miExp.Text   = L 'menu.export'
+    $script:miPause.Text = if ($script:State.Paused) { L 'menu.resume' } else { L 'menu.pause' }
+    $script:miLang.Text  = L 'menu.lang'
+    $script:miExit.Text  = L 'menu.quit'
 }
 Update-MtMenuText
 
-$miExit.Add_Click({
+$script:miExit.Add_Click({
     $script:Tray.Visible = $false
-    [MtSq]::CloseDb($Db)
+    [MtSq]::CloseDb($script:Db)
     try { $script:Mutex.ReleaseMutex() } catch { }
     [System.Windows.Forms.Application]::Exit()
 })
@@ -1058,23 +1060,23 @@ $timer.Add_Tick({
   try {
     if ($script:ShowEvt.WaitOne(0, $false)) { Write-MtLog 'show-panel request received'; Show-MtPanel }
     $now = Now-Unix
-    if ($now -ge $S.NextPollAt) {
+    if ($now -ge $script:State.NextPollAt) {
         try { Invoke-MtPoll } catch { Write-MtLog "poll error: $_ (line $($_.InvocationInfo.ScriptLineNumber))" }
         $script:LastInterval = Get-MtInterval
-        $S.NextPollAt = (Now-Unix) + $script:LastInterval
+        $script:State.NextPollAt = (Now-Unix) + $script:LastInterval
     }
   } catch {
     # Without this catch the exception climbs the message loop and kills the
     # process silently, leaving nothing in the log.
     Write-MtLog "tick error: $_ (line $($_.InvocationInfo.ScriptLineNumber))"
-    $S.NextPollAt = (Now-Unix) + $BaseInterval
+    $script:State.NextPollAt = (Now-Unix) + $script:BaseInterval
   }
 })
 $timer.Start()
 
-Write-MtLog "app started - tag $PlayerTag"
+Write-MtLog "app started - tag $script:PlayerTag"
 try { Invoke-MtPoll } catch { Write-MtLog "initial poll error: $_" }
-$S.NextPollAt = (Now-Unix) + (Get-MtInterval)
+$script:State.NextPollAt = (Now-Unix) + (Get-MtInterval)
 Update-MtTrayIcon
 
 if (-not $Hidden -and -not $Watchdog) { Show-MtPanel }

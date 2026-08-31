@@ -59,9 +59,9 @@ Every block re-filters at once through the period pills at the top
 ## English and Portuguese
 
 The interface ships in both. It follows the Windows display language on first
-run, and you switch any time with **Ctrl+L** in the panel, or from the tray menu
-(right-click the tray icon, then *Mudar para português* / *Switch to English*).
-The choice is remembered across restarts.
+run, and you switch any time with the **PT | EN** toggle in the title bar,
+with **Ctrl+L**, or from the tray menu. The choice is remembered across
+restarts.
 
 ![Portuguese](docs/pt-BR/overview.png)
 
