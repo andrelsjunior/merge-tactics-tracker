@@ -45,7 +45,8 @@ placement.
 unit you actually feel while playing ("I played badly tonight"), and no screen
 in the game shows it. Click a session to expand it into its individual games.
 
-![Sessions](docs/sessions-expanded.png)
+![Sessions](docs/sessions.png)
+![Sessions expanded](docs/sessions-expanded.png)
 
 **Hours** — average net by hour of day and by weekday. Reveals when you play
 well; nothing else crosses those two.
@@ -55,23 +56,24 @@ well; nothing else crosses those two.
 Every block re-filters at once through the period pills at the top
 (24h / 7 days / 30 days / All).
 
-## Portuguese and English
+## English and Portuguese
 
 The interface ships in both. It follows the Windows display language on first
-run, and you can switch any time with **Ctrl+L** or from the tray menu. The
-choice is remembered.
+run, and you switch any time with **Ctrl+L** in the panel, or from the tray menu
+(right-click the tray icon, then *Mudar para português* / *Switch to English*).
+The choice is remembered across restarts.
 
-![English](docs/overview-en.png)
+![Portuguese](docs/pt-BR/overview.png)
 
 ## Setup
 
 1. **Get an API token** at [developer.clashroyale.com](https://developer.clashroyale.com).
-   Save it in `token.txt` (see `token.txt.exemplo`).
+   Save it in `token.txt` (see `token.txt.example`).
 2. **Find your player tag** in the game profile and save it in `tag.txt`,
-   including the `#` (see `tag.txt.exemplo`).
+   including the `#` (see `tag.txt.example`).
 3. Run `MergeTactics.bat`.
 
-To start it with Windows, run `Instalar.ps1` once. `Desinstalar.ps1` reverses
+To start it with Windows, run `Install.ps1` once. `Uninstall.ps1` reverses
 it and keeps your data.
 
 Requires Windows 10/11 and PowerShell 5.1 (both preinstalled). No Python, no
@@ -83,20 +85,22 @@ runtime, no package manager.
 1 2 3 4    switch tabs
 Esc        hide the window (collection keeps running)
 F5         reload
-Ctrl+L     switch language
+Ctrl+L     switch language (English / Portuguese)
 Ctrl+E     export the history to merge-tactics.csv on the desktop
 ```
 
-The CSV carries timestamp, local time, delta, trophies, inferred placement and
-the reliability flags — enough to redo the analysis elsewhere.
+CSV columns: `timestamp, local_time, delta, trophies, place, gap_s, reliable,
+interval_s` — enough to redo the analysis elsewhere.
 
 ## How it stays alive
 
 Two scheduled tasks, not one:
 
-- `MergeTacticsTracker` fires at logon and runs `Iniciar.vbs`.
-- `MergeTacticsVigia` runs every 5 min and starts the collector **only if no
+- `MergeTacticsTracker` fires at logon and runs `Start.vbs`.
+- `MergeTacticsWatchdog` runs every 5 min and starts the collector **only if no
   instance is running**. It never opens the panel.
+
+`Install.ps1` registers both; `Uninstall.ps1` removes them and keeps your data.
 
 Without the watchdog, a mid-session crash went unnoticed until the next logon.
 The timer tick is wrapped in try/catch and every exit is logged, so a silent
@@ -114,19 +118,27 @@ death leaves a trace.
 ## Files
 
 ```
-MergeTactics.ps1   app (collection + panel assembly)
+MergeTactics.ps1   app: collection, queries, panel assembly
 MtUi.ps1           visual components, drawn in GDI+
-MtI18n.ps1         Portuguese and English strings
+MtI18n.ps1         interface strings, English and Portuguese
 MtLib.ps1          SQLite, network, alerts, log
-mt.db              database (not versioned)
-token.txt          API credential (not versioned)
-tag.txt            player tag (not versioned)
+MergeTactics.bat   launcher
+Start.vbs          starts the collector with no console window
+Watchdog.vbs       starts it only if no instance is running
+Install.ps1        registers both scheduled tasks
+Uninstall.ps1      removes them, keeps the data
+Status.ps1         is it collecting?
+Stop.ps1           stops the collector
+mt.db              database        (not versioned)
+token.txt          API credential  (not versioned)
+tag.txt            player tag      (not versioned)
+tracker.log        rotating log    (not versioned)
 ```
 
 The `.ps1` files are stored as **UTF-8 with BOM**. Without the BOM, PowerShell
 5.1 reads them as ANSI and mangles every accented character in the interface.
 
-Portuguese documentation: [LEIAME.md](LEIAME.md).
+Portuguese documentation: [README.pt-BR.md](README.pt-BR.md).
 
 ## License
 

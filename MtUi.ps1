@@ -1,6 +1,5 @@
-﻿# MtUi.ps1 - camada visual do painel. Tudo desenhado com GDI+: os controles
-# nativos do WinForms (ListView, borda da janela) nao aceitam tema escuro.
-# Paleta inspirada no Clash Royale: azul royal profundo, dourado de trofeu.
+﻿# MtUi.ps1 - visual layer. Everything is drawn with GDI+: the native WinForms
+# controls (ListView, window border) do not accept a dark theme.
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -36,18 +35,15 @@ $script:T = @{
     Amber     = New-MtColor 255 159  67   # 3o lugar: perde pouco, nao e derrota feia
 }
 
-# Cor de cada colocacao. Indice 0 nao e usado, para 1..4 casarem com a posicao.
+# Index 0 is unused so 1..4 match the placement.
 $script:MtPlaceC = @(
     $script:T.Faint, $script:T.Gold, $script:T.Up, $script:T.Amber, $script:T.Down
 )
 
-# Rolagem generica dos blocos de lista.
-#
-# WM_MOUSEWHEEL vai para o controle COM FOCO, e Panel nao e selecionavel: o
-# evento MouseWheel do proprio painel nunca disparava, e por isso nenhuma lista
-# rolava. O Form recebe a mensagem e chama esta funcao para o bloco que estiver
-# sob o cursor. Cada bloco publica MaxScroll durante o proprio Paint, que e
-# quando ele sabe quantas linhas couberam.
+# WM_MOUSEWHEEL goes to the FOCUSED control and a Panel is not selectable, so a
+# panel's own MouseWheel event never fires. The Form receives the message and
+# calls this for the block under the cursor. Each block publishes MaxScroll
+# during its own Paint, which is when it knows how many rows fit.
 function Invoke-MtScroll($panel, [int]$delta, [int]$step = 2) {
     if (-not $panel) { return }
     $st = $panel.Tag
@@ -60,14 +56,14 @@ function Invoke-MtScroll($panel, [int]$delta, [int]$step = 2) {
     if ($n -ne [int]$st.Scroll) { $st.Scroll = $n; $panel.Invalidate() }
 }
 
-# Pilula colorida com a colocacao inferida (1o..4o).
-function Draw-MtPlacePill($g, [int]$place, [single]$x, [single]$y, [single]$w, [single]$h, [bool]$duvida = $false) {
+# Colored pill with the inferred placement.
+function Draw-MtPlacePill($g, [int]$place, [single]$x, [single]$y, [single]$w, [single]$h, [bool]$uncertain = $false) {
     $c = $script:MtPlaceC[$place]
     $path = New-MtRoundPath $x $y $w $h ($h / 2)
     $b = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(46, $c))
     $g.FillPath($b, $path); $b.Dispose()
     $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(130, $c)), 1
-    if ($duvida) { $pen.DashStyle = 'Dot' }
+    if ($uncertain) { $pen.DashStyle = 'Dot' }
     $g.DrawPath($pen, $path); $pen.Dispose()
     $f = New-MtFont 8.5 'Bold'
     $tb = New-Object System.Drawing.SolidBrush $c
@@ -94,8 +90,7 @@ function New-MtRoundPath([single]$x, [single]$y, [single]$w, [single]$h, [single
     $p
 }
 
-# Sombra suave: varias bordas arredondadas com alpha decrescente. Da o
-# relevo que uma borda de 1px sozinha nao consegue.
+# Soft shadow: stacked rounded borders with decreasing alpha.
 function Draw-MtShadow($g, [int]$W, [int]$H, [int]$radius = 14, [int]$depth = 5) {
     for ($i = $depth; $i -ge 1; $i--) {
         $a = [int](16 - $i * 2)
@@ -107,7 +102,7 @@ function Draw-MtShadow($g, [int]$W, [int]$H, [int]$radius = 14, [int]$depth = 5)
     }
 }
 
-# Fundo padrao dos blocos: gradiente vertical suave, borda, cantos arredondados.
+# Standard block background.
 function Draw-MtPanelBg($g, [int]$W, [int]$H, [int]$radius = 14) {
     $path = New-MtRoundPath 0.5 0.5 ($W - 1) ($H - 1) $radius
     $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
@@ -115,7 +110,7 @@ function Draw-MtPanelBg($g, [int]$W, [int]$H, [int]$radius = 14) {
         (New-Object System.Drawing.Point 0, $H),
         $script:T.Surface, $script:T.BgDeep)
     $g.FillPath($grad, $path); $grad.Dispose()
-    # bisel: linha clara no topo, como se a luz viesse de cima
+    # bevel: light line on top, as if lit from above
     $hl = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(26, 255, 255, 255)), 1
     $g.DrawArc($hl, 1, 1, ($radius * 2), ($radius * 2), 180, 90)
     $g.DrawLine($hl, ($radius + 1), 1, ($W - $radius - 1), 1)
@@ -126,23 +121,23 @@ function Draw-MtPanelBg($g, [int]$W, [int]$H, [int]$radius = 14) {
     $path
 }
 
-# ------------------------------------------------------------------- icones
-# Vetoriais: escalam sem borrar e nao dependem de arquivo externo.
+# --------------------------------------------------------------------- icons
+# Vector: they scale without blurring and need no external file.
 
 function Draw-MtTrophy($g, [single]$x, [single]$y, [single]$s, $color) {
     $b = New-Object System.Drawing.SolidBrush $color
-    # copo: boca reta em cima, fundo arredondado embaixo
+    # cup: straight mouth, rounded bottom
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
     $p.AddLine(($x + $s * 0.24), ($y + $s * 0.08), ($x + $s * 0.76), ($y + $s * 0.08))
     $p.AddArc(($x + $s * 0.24), ($y + $s * 0.08), ($s * 0.52), ($s * 0.56), 0, 180)
     $p.CloseFigure()
     $g.FillPath($b, $p); $p.Dispose()
-    # alcas laterais, finas e coladas no copo
+    # side handles
     $pen = New-Object System.Drawing.Pen $color, ($s * 0.07)
     $g.DrawArc($pen, ($x + $s * 0.06), ($y + $s * 0.12), ($s * 0.24), ($s * 0.26), 100, 170)
     $g.DrawArc($pen, ($x + $s * 0.70), ($y + $s * 0.12), ($s * 0.24), ($s * 0.26), 270, 170)
     $pen.Dispose()
-    # haste e base
+    # stem and base
     $g.FillRectangle($b, ($x + $s * 0.44), ($y + $s * 0.60), ($s * 0.12), ($s * 0.16))
     $bp = New-MtRoundPath ($x + $s * 0.28) ($y + $s * 0.76) ($s * 0.44) ($s * 0.14) ($s * 0.04)
     $g.FillPath($b, $bp); $bp.Dispose()
@@ -217,7 +212,7 @@ function Draw-MtSectionTitle($g, [string]$icon, [string]$text, [single]$x, [sing
     $f.Dispose(); $b.Dispose()
 }
 
-# --------------------------------------------------------------- card de metrica
+# ------------------------------------------------------------------ stat card
 function New-MtStatCard([string]$label, [string]$value, $color, [string]$icon, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -248,7 +243,7 @@ function New-MtStatCard([string]$label, [string]$value, $color, [string]$icon, [
     $p
 }
 
-# ------------------------------------------------------------ pilulas de filtro
+# ----------------------------------------------------------------- filter pills
 function New-MtFilterBar($options, [string]$selected, [scriptblock]$onChange, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -320,9 +315,9 @@ function New-MtFilterBar($options, [string]$selected, [scriptblock]$onChange, [i
     $p
 }
 
-# ------------------------------------------------------------ grafico de linha
-# Com crosshair e tooltip: passar o mouse mostra o valor e a data do ponto
-# mais proximo. Uma curva sem leitura ponto-a-ponto e quase decorativa.
+# ------------------------------------------------------------------- area chart
+# Crosshair and tooltip: hovering shows the value and date of the nearest point.
+# A curve you cannot read point by point is close to decorative.
 function New-MtAreaChart($series, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -402,7 +397,7 @@ function New-MtAreaChart($series, [int]$w, [int]$h) {
         $wb = New-Object System.Drawing.SolidBrush $script:T.BgDeep
         $g.FillEllipse($wb, ($last.X - 2), ($last.Y - 2), 4, 4); $wb.Dispose()
 
-        # crosshair + tooltip do ponto sob o mouse
+        # crosshair and tooltip for the point under the mouse
         $hv = [int]$st.Hover
         if ($hv -ge 0 -and $hv -lt $n) {
             $hp = $pts[$hv]
@@ -457,11 +452,9 @@ function New-MtAreaChart($series, [int]$w, [int]$h) {
     $p
 }
 
-# --------------------------------------------------------- grafico de colocacoes
-# Substitui o antigo "Quanto vale cada colocacao", que mostrava saldos crus e
-# exigia que o leitor descobrisse sozinho o que os agrupamentos diziam. Aqui
-# a leitura ja vem pronta: quantas vezes voce terminou em cada posicao. A faixa de saldo observada fica no rodape, como
-# prova de onde a inferencia sai.
+# ------------------------------------------------------------- placement chart
+# How many times you finished in each position. The observed delta range sits in
+# the footer, as evidence for where the inference comes from.
 function New-MtPlacementChart($pack, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -494,7 +487,7 @@ function New-MtPlacementChart($pack, [int]$w, [int]$h) {
         }
 
         $sub = (L 'pl.sub') -f ([string]$pack.Avg), $tot
-        if ([int]$pack.Duvida -gt 0) { $sub += (L 'pl.sub.doubt') -f $pack.Duvida }
+        if ([int]$pack.Uncertain -gt 0) { $sub += (L 'pl.sub.doubt') -f $pack.Uncertain }
         $g.DrawString($sub, $fsm, $bd, 18, 34)
 
         $rows  = @($pack.Rows)
@@ -513,7 +506,7 @@ function New-MtPlacementChart($pack, [int]$w, [int]$h) {
             $g.DrawString((Get-MtOrd $r.Place), $fb, $lb, 18, ($y + 1))
             $lb.Dispose()
 
-            # trilho: da a escala mesmo quando a barra e curta
+            # track: keeps the scale readable when the bar is short
             $tr = New-MtRoundPath $barX ($y + 3) $barW 13 6.5
             $tb = New-Object System.Drawing.SolidBrush $script:T.Surface
             $g.FillPath($tb, $tr); $tb.Dispose(); $tr.Dispose()
@@ -538,8 +531,8 @@ function New-MtPlacementChart($pack, [int]$w, [int]$h) {
             if ($r.Seen) {
                 $lo = if ($r.Lo -gt 0) { "+$($r.Lo)" } else { "$($r.Lo)" }
                 $hi = if ($r.Hi -gt 0) { "+$($r.Hi)" } else { "$($r.Hi)" }
-                $faixa = if ($r.Lo -eq $r.Hi) { $lo } else { "$lo" + [char]0x2026 + "$hi" }
-                $g.DrawString($faixa, $fsm, $bd, (New-Object System.Drawing.RectangleF ($W - 78), ($y + 3), 62, 13), $sfr)
+                $range = if ($r.Lo -eq $r.Hi) { $lo } else { "$lo" + [char]0x2026 + "$hi" }
+                $g.DrawString($range, $fsm, $bd, (New-Object System.Drawing.RectangleF ($W - 78), ($y + 3), 62, 13), $sfr)
             }
             $y += $rh
         }
@@ -552,12 +545,12 @@ function New-MtPlacementChart($pack, [int]$w, [int]$h) {
     $p
 }
 
-# ----------------------------------------------------------- grafico de barras
-function New-MtBars($data, [int]$w, [int]$h, [string]$chaveTitulo, [string]$icon = 'cal') {
+# ------------------------------------------------------------------- bar chart
+function New-MtBars($data, [int]$w, [int]$h, [string]$titleKey, [string]$icon = 'cal') {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = @{ Data = @($data); Caption = $chaveTitulo; Icon = $icon }
+    $p.Tag = @{ Data = @($data); Caption = $titleKey; Icon = $icon }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -610,14 +603,14 @@ function New-MtBars($data, [int]$w, [int]$h, [string]$chaveTitulo, [string]$icon
                 [System.Drawing.Color]::FromArgb(110, $c))
             $g.FillPath($grad, $bp); $grad.Dispose(); $bp.Dispose()
 
-            # valor sempre acima do eixo: abaixo colidiria com os rotulos
+            # value always above the axis: below it would collide with the labels
             $vtxt = if ($d.Net -ge 0) { "+$($d.Net)" } else { "$($d.Net)" }
             $vy = if ($d.Net -ge 0) { $mid - $bh - 15 } else { $mid - 16 }
             $vb = New-Object System.Drawing.SolidBrush $c
             $g.DrawString($vtxt, $fb, $vb, (New-Object System.Drawing.RectangleF ($cx - 40), $vy, 80, 13), $sf)
             $vb.Dispose()
 
-            # 2026-08-27 -> 27/08 ; qualquer outro formato passa inteiro
+            # 2026-08-27 -> 08/27; any other format passes through
             $lbl = if ($d.D -match '^\d{4}-(\d{2})-(\d{2})$') { (L 'fmt.daymonth') -f $Matches[2], $Matches[1] } else { $d.D }
             $g.DrawString($lbl, $f, $bd, (New-Object System.Drawing.RectangleF ($cx - 40), ($bottom + 4), 80, 12), $sf)
             $g.DrawString(((L 'ch.games') -f $d.N), $f, $bd, (New-Object System.Drawing.RectangleF ($cx - 40), ($bottom + 15), 80, 12), $sf)
@@ -628,15 +621,14 @@ function New-MtBars($data, [int]$w, [int]$h, [string]$chaveTitulo, [string]$icon
     $p
 }
 
-# ------------------------------------------------------- lista de partidas
-# Rola com a roda do mouse (o Form roteia o evento, ver Invoke-MtScroll) e
-# mostra a colocacao inferida de cada jogo. Serve tanto ao bloco baixo da
-# visao geral quanto a aba Partidas, que recebe o historico inteiro.
-function New-MtMatchList($rows, [int]$w, [int]$h, [string]$chaveTitulo = 'sec.recent') {
+# -------------------------------------------------------------------- match list
+# Scrolls with the wheel (routed by the Form, see Invoke-MtScroll). Serves both
+# the Overview block and the Matches tab, which gets the whole history.
+function New-MtMatchList($rows, [int]$w, [int]$h, [string]$titleKey = 'sec.recent') {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
-    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Titulo = $chaveTitulo }
+    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Title = $titleKey }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -648,7 +640,7 @@ function New-MtMatchList($rows, [int]$w, [int]$h, [string]$chaveTitulo = 'sec.re
         $g.SetClip($path); $path.Dispose()
 
         $st = $s.Tag
-        Draw-MtSectionTitle $g 'swords' (L $st.Titulo) 18 15
+        Draw-MtSectionTitle $g 'swords' (L $st.Title) 18 15
 
         $rows = @($st.Rows)
         $f = New-MtFont 9
@@ -667,10 +659,13 @@ function New-MtMatchList($rows, [int]$w, [int]$h, [string]$chaveTitulo = 'sec.re
 
         $rh = 32
         $topY = 44
-        $rodape = if ($rows.Count -gt 4) { 18 } else { 4 }
-        $vis = [Math]::Max(1, [int](($H - $topY - $rodape) / $rh))
+        $footerH = if ($rows.Count -gt 4) { 18 } else { 4 }
+        $vis = [Math]::Max(1, [int](($H - $topY - $footerH) / $rh))
         $st.MaxScroll = [Math]::Max(0, $rows.Count - $vis)
+        # write the clamped position back: clamping only while drawing left
+        # Scroll too high, and the first wheel-ups moved nothing
         $start = [Math]::Min([int]$st.Scroll, $st.MaxScroll)
+        $st.Scroll = $start
         $y = $topY
 
         for ($i = $start; $i -lt [Math]::Min($rows.Count, $start + $vis); $i++) {
@@ -713,9 +708,9 @@ function New-MtMatchList($rows, [int]$w, [int]$h, [string]$chaveTitulo = 'sec.re
         }
 
         if ($rows.Count -gt $vis) {
-            $de = $start + 1
-            $ate = [Math]::Min($rows.Count, $start + $vis)
-            $g.DrawString(((L 'ml.range') -f $de, $ate, $rows.Count), $fsm, $ffaint, 18, ($H - 16))
+            $from = $start + 1
+            $to = [Math]::Min($rows.Count, $start + $vis)
+            $g.DrawString(((L 'ml.range') -f $from, $to, $rows.Count), $fsm, $ffaint, 18, ($H - 16))
             Draw-MtScrollbar $g ($W - 8) $topY ($vis * $rh) $rows.Count $vis $start
         } elseif ($rows.Count -gt 4) {
             $g.DrawString(((L 'ml.count') -f $rows.Count), $fsm, $ffaint, 18, ($H - 16))
@@ -728,7 +723,7 @@ function New-MtMatchList($rows, [int]$w, [int]$h, [string]$chaveTitulo = 'sec.re
     $p
 }
 
-# Barra de rolagem fina desenhada a mao: o scrollbar nativo nao aceita o tema.
+# Hand-drawn scrollbar: the native one does not accept the theme.
 function Draw-MtScrollbar($g, [single]$x, [single]$y, [single]$h, [int]$total, [int]$vis, [int]$start) {
     if ($total -le $vis -or $h -le 0) { return }
     $tr = New-MtRoundPath $x $y 3 $h 1.5
@@ -741,9 +736,8 @@ function Draw-MtScrollbar($g, [single]$x, [single]$y, [single]$h, [int]$total, [
     $g.FillPath($kb, $kp); $kb.Dispose(); $kp.Dispose()
 }
 
-# ------------------------------------------------------------------- abas
-# TabControl nativo nao aceita tema escuro; abas desenhadas a mao com
-# sublinhado no item ativo.
+# ------------------------------------------------------------------------- tabs
+# The native TabControl does not accept a dark theme.
 function New-MtTabs($labels, [int]$selected, [scriptblock]$onChange, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -803,16 +797,15 @@ function New-MtTabs($labels, [int]$selected, [scriptblock]$onChange, [int]$w, [i
     $p
 }
 
-# ------------------------------------------------------------ lista de sessoes
-# Clicar numa linha abre a sessao e mostra as partidas dela, uma a uma, com a
-# colocacao inferida. Sem isso a aba so dizia "voce foi mal ontem a noite" sem
-# deixar ver onde foi mal.
+# ------------------------------------------------------------------ session list
+# Clicking a row expands the session into its individual matches. Without that
+# the tab only said "you played badly last night" without showing where.
 function New-MtSessionList($rows, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
     $p.BackColor = $script:T.Bg
     $p.Cursor = 'Hand'
-    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Aberta = -1; Hits = @() }
+    $p.Tag = @{ Rows = @($rows); Scroll = 0; MaxScroll = 0; Expanded = -1; Hits = @() }
     $p.Add_Paint({
         param($s, $e)
         $g = $e.Graphics
@@ -846,99 +839,99 @@ function New-MtSessionList($rows, [int]$w, [int]$h) {
         $g.DrawString((L 'ss.hint'), $ftin, $bd, 190, 17)
 
         $topY  = 44
-        $limY  = $H - 22
+        $limitY  = $H - 22
         $rh    = 48
-        $mrh   = 25
+        $matchH   = 25
         $start = [Math]::Min([int]$st.Scroll, [Math]::Max(0, $rows.Count - 1))
         $y     = $topY
         $hits  = @()
-        $desenhadas = 0
+        $drawn = 0
 
         for ($i = $start; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
-            $aberta = ($i -eq [int]$st.Aberta)
-            $nm = if ($aberta) { @($r.Matches).Count } else { 0 }
-            $altura = $rh + ($nm * $mrh) + $(if ($aberta) { 8 } else { 0 })
-            if ($y + $rh -gt $limY) { break }
+            $expanded = ($i -eq [int]$st.Expanded)
+            $nm = if ($expanded) { @($r.Matches).Count } else { 0 }
+            $blockH = $rh + ($nm * $matchH) + $(if ($expanded) { 8 } else { 0 })
+            if ($y + $rh -gt $limitY) { break }
 
-            $zb = New-Object System.Drawing.SolidBrush $(if ($aberta) { $script:T.Raised } elseif ($desenhadas % 2 -eq 0) { $script:T.Raised } else { $script:T.Surface })
-            $zp = New-MtRoundPath 14 $y ($W - 28) ([Math]::Min($altura - 5, $limY - $y)) 8
+            $zb = New-Object System.Drawing.SolidBrush $(if ($expanded) { $script:T.Raised } elseif ($drawn % 2 -eq 0) { $script:T.Raised } else { $script:T.Surface })
+            $zp = New-MtRoundPath 14 $y ($W - 28) ([Math]::Min($blockH - 5, $limitY - $y)) 8
             $g.FillPath($zb, $zp); $zb.Dispose(); $zp.Dispose()
 
             $c = if ($r.Net -ge 0) { $script:T.Up } else { $script:T.Down }
             $ab = New-Object System.Drawing.SolidBrush $c
-            $accent = New-MtRoundPath 14 $y 4 ([Math]::Min($altura - 5, $limY - $y)) 2
+            $accent = New-MtRoundPath 14 $y 4 ([Math]::Min($blockH - 5, $limitY - $y)) 2
             $g.FillPath($ab, $accent); $accent.Dispose()
 
-            $ini = [DateTimeOffset]::FromUnixTimeSeconds($r.Start).LocalDateTime
-            $fim = [DateTimeOffset]::FromUnixTimeSeconds($r.End).LocalDateTime
+            $startAt = [DateTimeOffset]::FromUnixTimeSeconds($r.Start).LocalDateTime
+            $endAt = [DateTimeOffset]::FromUnixTimeSeconds($r.End).LocalDateTime
             $dur = [int](($r.End - $r.Start) / 60)
-            $g.DrawString($ini.ToString((L 'fmt.dt')), $f, $btx, 30, ($y + 7))
-            $span = if ($dur -ge 1) { (L 'ss.until') -f $fim.ToString('HH:mm'), $dur } else { L 'ss.short' }
+            $g.DrawString($startAt.ToString((L 'fmt.dt')), $f, $btx, 30, ($y + 7))
+            $span = if ($dur -ge 1) { (L 'ss.until') -f $endAt.ToString('HH:mm'), $dur } else { L 'ss.short' }
             $g.DrawString($span, $fsm, $bd, 30, ($y + 25))
 
             $nt = if ($r.Net -ge 0) { "+$($r.Net)" } else { "$($r.Net)" }
             $g.DrawString($nt, $fb, $ab, 168, ($y + 11))
 
-            $qtd = if ($r.N -eq 1) { L 'ss.match.1' } else { (L 'ss.match.n') -f $r.N }
-            $g.DrawString($qtd, $f, $bdim, 244, ($y + 7))
+            $countText = if ($r.N -eq 1) { L 'ss.match.1' } else { (L 'ss.match.n') -f $r.N }
+            $g.DrawString($countText, $f, $bdim, 244, ($y + 7))
             $g.DrawString(((L 'ss.avg') -f "$([math]::Round($r.AvgPlace, 1))"), $fsm, $bd, 244, ($y + 25))
 
-            # barra empilhada com a proporcao de cada colocacao na sessao:
-            # diz num relance se a sessao foi ruim por muitos 4o ou por poucos 1o
+            # stacked bar: tells at a glance whether a bad session came from
+            # too many 4ths or too few 1sts
             $bx = 356.0
             $bw = 220.0
             $tr = New-MtRoundPath $bx ($y + 12) $bw 14 7
             $trb = New-Object System.Drawing.SolidBrush $script:T.Bg
             $g.FillPath($trb, $tr); $trb.Dispose()
-            # Save/Restore preserva o clip do painel. Refazer Draw-MtPanelBg aqui
-            # repintava o fundo por cima de tudo que ja tinha sido desenhado.
-            $estado = $g.Save()
+            # Save/Restore keeps the panel clip. Calling Draw-MtPanelBg here
+            # repainted the background over everything already drawn.
+            $state = $g.Save()
             $g.SetClip($tr, [System.Drawing.Drawing2D.CombineMode]::Intersect)
             $px = $bx
             for ($k = 1; $k -le 4; $k++) {
                 $qt = [int]$r.P[$k]
                 if ($qt -le 0) { continue }
-                $seg = $bw * $qt / $r.N
+                $segW = $bw * $qt / $r.N
                 $sb2 = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(215, $script:MtPlaceC[$k]))
-                $g.FillRectangle($sb2, $px, ($y + 12), $seg, 14); $sb2.Dispose()
-                if ($seg -ge 16) {
+                $g.FillRectangle($sb2, $px, ($y + 12), $segW, 14); $sb2.Dispose()
+                if ($segW -ge 16) {
                     $lbb = New-Object System.Drawing.SolidBrush $script:T.BgDeep
                     $sfc = New-Object System.Drawing.StringFormat
                     $sfc.Alignment = 'Center'; $sfc.LineAlignment = 'Center'
-                    $g.DrawString([string]$qt, $ftin, $lbb, (New-Object System.Drawing.RectangleF $px, ($y + 12), $seg, 14), $sfc)
+                    $g.DrawString([string]$qt, $ftin, $lbb, (New-Object System.Drawing.RectangleF $px, ($y + 12), $segW, 14), $sfc)
                     $lbb.Dispose()
                 }
-                $px += $seg
+                $px += $segW
             }
-            $g.Restore($estado)
+            $g.Restore($state)
             $trp = New-Object System.Drawing.Pen $script:T.Border, 1
             $g.DrawPath($trp, $tr); $trp.Dispose(); $tr.Dispose()
 
             Draw-MtIcon $g 'trophy' 604 ($y + 13) 13 $script:T.Gold
             $g.DrawString("$($r.StartTro) " + [char]0x2192 + " $($r.EndTro)", $f, $btx, 622, ($y + 12))
 
-            # seta de expansao
-            $chev = New-Object System.Drawing.Pen $(if ($aberta) { $script:T.Text } else { $script:T.Faint }), 2
-            $chev.StartCap = 'Round'; $chev.EndCap = 'Round'
+            # expand chevron
+            $chevron = New-Object System.Drawing.Pen $(if ($expanded) { $script:T.Text } else { $script:T.Faint }), 2
+            $chevron.StartCap = 'Round'; $chevron.EndCap = 'Round'
             $cxx = $W - 40; $cyy = $y + 20
-            if ($aberta) {
-                $g.DrawLine($chev, $cxx, ($cyy + 3), ($cxx + 5), ($cyy - 3))
-                $g.DrawLine($chev, ($cxx + 5), ($cyy - 3), ($cxx + 10), ($cyy + 3))
+            if ($expanded) {
+                $g.DrawLine($chevron, $cxx, ($cyy + 3), ($cxx + 5), ($cyy - 3))
+                $g.DrawLine($chevron, ($cxx + 5), ($cyy - 3), ($cxx + 10), ($cyy + 3))
             } else {
-                $g.DrawLine($chev, $cxx, ($cyy - 3), ($cxx + 5), ($cyy + 3))
-                $g.DrawLine($chev, ($cxx + 5), ($cyy + 3), ($cxx + 10), ($cyy - 3))
+                $g.DrawLine($chevron, $cxx, ($cyy - 3), ($cxx + 5), ($cyy + 3))
+                $g.DrawLine($chevron, ($cxx + 5), ($cyy + 3), ($cxx + 10), ($cyy - 3))
             }
-            $chev.Dispose()
+            $chevron.Dispose()
 
             $hits += [pscustomobject]@{ Idx = $i; Y = $y; H = $rh }
             $y += $rh
 
-            if ($aberta) {
+            if ($expanded) {
                 $sep = New-Object System.Drawing.Pen $script:T.Border, 1
                 $g.DrawLine($sep, 30, ($y - 3), ($W - 30), ($y - 3)); $sep.Dispose()
                 foreach ($m in @($r.Matches)) {
-                    if ($y + $mrh -gt $limY) { break }
+                    if ($y + $matchH -gt $limitY) { break }
                     $mw = [DateTimeOffset]::FromUnixTimeSeconds($m.Ts).LocalDateTime.ToString('HH:mm')
                     $g.DrawString($mw, $fsm, $bd, 44, ($y + 5))
                     Draw-MtPlacePill $g $m.Place 92 ($y + 3) 36 17 ($m.Certain -ne 1)
@@ -951,19 +944,20 @@ function New-MtSessionList($rows, [int]$w, [int]$h) {
                     if ($m.Certain -ne 1) {
                         $g.DrawString((L 'ml.uncertain.s'), $ftin, $bd, 262, ($y + 6))
                     }
-                    $y += $mrh
+                    $y += $matchH
                 }
                 $y += 8
             }
             $ab.Dispose()
-            $desenhadas++
+            $drawn++
         }
 
         $st.Hits = $hits
-        $st.MaxScroll = [Math]::Max(0, $rows.Count - $desenhadas)
+        $st.MaxScroll = [Math]::Max(0, $rows.Count - $drawn)
+        if ([int]$st.Scroll -gt $st.MaxScroll) { $st.Scroll = $st.MaxScroll }
         if ($st.MaxScroll -gt 0) {
             $g.DrawString(((L 'ss.count.scroll') -f $rows.Count), $ftin, $bd, 18, ($H - 16))
-            Draw-MtScrollbar $g ($W - 8) $topY ($limY - $topY) $rows.Count $desenhadas $start
+            Draw-MtScrollbar $g ($W - 8) $topY ($limitY - $topY) $rows.Count $drawn $start
         } else {
             $g.DrawString(((L 'ss.count') -f $rows.Count), $ftin, $bd, 18, ($H - 16))
         }
@@ -978,7 +972,7 @@ function New-MtSessionList($rows, [int]$w, [int]$h) {
         $st = $s.Tag
         foreach ($hit in @($st.Hits)) {
             if ($e.Y -ge $hit.Y -and $e.Y -lt ($hit.Y + $hit.H)) {
-                $st.Aberta = if ([int]$st.Aberta -eq $hit.Idx) { -1 } else { $hit.Idx }
+                $st.Expanded = if ([int]$st.Expanded -eq $hit.Idx) { -1 } else { $hit.Idx }
                 $s.Invalidate()
                 break
             }
@@ -987,7 +981,7 @@ function New-MtSessionList($rows, [int]$w, [int]$h) {
     $p
 }
 
-# --------------------------------------------------------- desempenho por hora
+# ------------------------------------------------------------ hour-of-day chart
 function New-MtHourChart($hours, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -1048,14 +1042,14 @@ function New-MtHourChart($hours, [int]$w, [int]$h) {
                     [System.Drawing.Color]::FromArgb(255, $c),
                     [System.Drawing.Color]::FromArgb(110, $c))
                 $g.FillPath($grad, $bp); $grad.Dispose(); $bp.Dispose()
-                # a contagem fica colada na ponta da barra. No eixo, a 120px de
-                # distancia, ninguem ligava o numero a barra certa.
+                # count sits at the bar tip: on the axis, 120px away, nobody
+                # connected the number to the right bar
                 $nb = New-Object System.Drawing.SolidBrush $script:T.Dim
                 $ny = if ($d.Avg -ge 0) { $y - 13 } else { $y + $bh + 2 }
                 $g.DrawString([string]$d.N, $f, $nb, (New-Object System.Drawing.RectangleF ($cx - 20), $ny, 40, 11), $sf)
                 $nb.Dispose()
             } else {
-                # hora sem partida: marca discreta na linha de base
+                # hour with no matches: discreet mark on the baseline
                 $eb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(70, $script:T.Faint))
                 $g.FillRectangle($eb, ($cx - 1.5), ($mid - 1), 3, 2); $eb.Dispose()
             }
@@ -1069,7 +1063,7 @@ function New-MtHourChart($hours, [int]$w, [int]$h) {
     $p
 }
 
-# ---------------------------------------------------- desempenho por dia da semana
+# --------------------------------------------------------------- weekday chart
 function New-MtWeekdayChart($days, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Size = New-Object System.Drawing.Size $w, $h
@@ -1152,7 +1146,7 @@ function New-MtWeekdayChart($days, [int]$w, [int]$h) {
     $p
 }
 
-# ------------------------------------------------------ barra de titulo propria
+# --------------------------------------------------------------- own title bar
 function Add-MtTitleBar($form, [string]$title) {
     $bar = New-Object System.Windows.Forms.Panel
     $bar.Dock = 'Top'
@@ -1178,7 +1172,7 @@ function Add-MtTitleBar($form, [string]$title) {
         $f.Dispose(); $b.Dispose()
     })
     $bar.Add_MouseDown({ param($s, $e) if ($e.Button -eq 'Left') { [MtWin]::Drag($s.FindForm().Handle) } })
-    # so apos entrar no form a largura real fica conhecida
+    # the real width is only known after the bar is added to the form
     $form.Controls.Add($bar)
 
     foreach ($spec in @(@{ T = 'X'; X = -46; Act = 'close' }, @{ T = '-'; X = -84; Act = 'min' })) {

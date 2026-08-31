@@ -6,7 +6,7 @@ Fonte única: **API oficial do Clash Royale**. Nenhum site de terceiros.
 O jogo mostra um número de troféus. Ele não mostra como você chegou nele.
 Isto mostra.
 
-![Visão geral](docs/overview.png)
+![Visão geral](docs/pt-BR/overview.png)
 
 ## Sem instalar nada
 
@@ -19,9 +19,9 @@ Isto mostra.
 ## Primeiro uso
 
 1. Gere um token da API em [developer.clashroyale.com](https://developer.clashroyale.com)
-   e salve em `token.txt` (veja `token.txt.exemplo`).
+   e salve em `token.txt` (veja `token.txt.example`).
 2. Pegue a tag do jogador no perfil do jogo e salve em `tag.txt`, com o `#`
-   (veja `tag.txt.exemplo`).
+   (veja `tag.txt.example`).
 3. Rode `MergeTactics.bat`.
 
 | Ação | Como |
@@ -29,9 +29,9 @@ Isto mostra.
 | Abrir o painel | duplo clique no ícone da bandeja, ou `MergeTactics.bat` |
 | Iniciar | `MergeTactics.bat` (ou sozinho no logon) |
 | Pausar / Sair | menu do botão direito no ícone |
-| Parar tudo | `Parar.ps1` |
-| Instalar no logon | `Instalar.ps1` |
-| Remover do logon | `Desinstalar.ps1` |
+| Parar tudo | `Stop.ps1` |
+| Instalar no logon | `Install.ps1` |
+| Remover do logon | `Uninstall.ps1` |
 | Diagnóstico | `Status.ps1` |
 
 O ícone da bandeja mostra os troféus atuais. Uma segunda execução do atalho
@@ -65,7 +65,7 @@ colocações.
 **Partidas** — o histórico inteiro, rolável, uma linha por jogo com a colocação
 inferida.
 
-![Partidas](docs/matches.png)
+![Partidas](docs/pt-BR/matches.png)
 
 **Sessões** — partidas separadas por menos de 30 min contam como uma sessão. É
 a unidade que você percebe jogando ("hoje à noite fui mal"), e nenhuma tela do
@@ -73,12 +73,13 @@ jogo mostra isso. Cada linha traz duração, saldo, a mistura de colocações nu
 barra empilhada e a variação de troféus. **Clique numa sessão** para abrir as
 partidas dela, uma a uma.
 
-![Sessões](docs/sessions-expanded.png)
+![Sessões](docs/pt-BR/sessions.png)
+![Sessão aberta](docs/pt-BR/sessions-expanded.png)
 
 **Horários** — saldo médio por hora do dia e por dia da semana. Revela em que
 horário você rende mais; nenhuma outra fonte cruza isso.
 
-![Horários](docs/hours.png)
+![Horários](docs/pt-BR/hours.png)
 
 O filtro de período no topo (**24h / 7 dias / 30 dias / Tudo**) refiltra todos
 os blocos de uma vez.
@@ -86,19 +87,20 @@ os blocos de uma vez.
 ## Português e inglês
 
 A interface vem nos dois idiomas. Ela segue o idioma do Windows na primeira
-execução, e dá para trocar a qualquer momento com **Ctrl+L** ou pelo menu da
-bandeja. A escolha fica gravada.
+execução, e dá para trocar a qualquer momento com **Ctrl+L** no painel, ou pelo
+menu da bandeja (botão direito no ícone, depois *Switch to English* / *Mudar
+para português*). A escolha fica gravada e sobrevive ao reinício.
 
 ## Atalhos e exportação
 
     1 2 3 4    troca de aba
     Esc        esconde a janela (a coleta continua)
     F5         recarrega os dados
-    Ctrl+L     troca o idioma
+    Ctrl+L     troca o idioma (português / inglês)
     Ctrl+E     exporta o histórico para merge-tactics.csv na área de trabalho
 
-O CSV leva timestamp, hora local, saldo, troféus, colocação inferida e as
-marcas de confiabilidade — o bastante para refazer a análise fora do app.
+Colunas do CSV: `timestamp, local_time, delta, trophies, place, gap_s, reliable,
+interval_s` — o bastante para refazer a análise fora do app.
 
 ## Cabeçalho
 
@@ -120,8 +122,8 @@ linha vem marcada como espaçada.
 
 Duas tarefas agendadas, não uma:
 
-- `MergeTacticsTracker` — dispara no logon, roda `Iniciar.vbs`.
-- `MergeTacticsVigia` — a cada 5 min, roda `Vigia.vbs`, que sobe o coletor
+- `MergeTacticsTracker` — dispara no logon, roda `Start.vbs`.
+- `MergeTacticsWatchdog` — a cada 5 min, roda `Watchdog.vbs`, que sobe o coletor
   com `-Watchdog` **apenas se não houver instância**. Nunca abre o painel.
 
 Sem o vigia, uma morte no meio da sessão ficava até o próximo logon: foi o que
@@ -143,14 +145,21 @@ processo sem escrever nada no log. Toda saída agora loga (`app encerrado` /
 
 ## Arquivos
 
-    MergeTactics.ps1   app (coleta + montagem do painel)
+    MergeTactics.ps1   app: coleta, consultas, montagem do painel
     MtUi.ps1           componentes visuais desenhados em GDI+
-    MtI18n.ps1         textos em português e inglês
+    MtI18n.ps1         textos da interface, inglês e português
     MtLib.ps1          SQLite, rede, alertas, log
-    mt.db              banco (não versionado)
+    MergeTactics.bat   atalho de início
+    Start.vbs          sobe o coletor sem janela de console
+    Watchdog.vbs       só sobe se não houver instância
+    Install.ps1        registra as duas tarefas agendadas
+    Uninstall.ps1      remove as tarefas, preserva os dados
+    Status.ps1         está coletando?
+    Stop.ps1           encerra o coletor
+    mt.db              banco             (não versionado)
     token.txt          credencial da API (não versionada)
-    tag.txt            tag do jogador (não versionada)
-    tracker.log        log rotativo
+    tag.txt            tag do jogador    (não versionada)
+    tracker.log        log rotativo      (não versionado)
 
 Os `.ps1` são gravados em **UTF-8 com BOM**. Sem o BOM, o PowerShell 5.1 lê o
 arquivo como ANSI e corrompe todos os acentos da interface.
