@@ -18,10 +18,15 @@ $script:MtStrings = @{
         'hdr.streak.up'     = '{0} vitórias seguidas'
         'hdr.streak.down'   = '{0} quedas seguidas'
 
-        'per.24h'           = '24h'
+        'per.24h'           = '24 horas'
+        'per.48h'           = '48 horas'
         'per.7d'            = '7 dias'
+        'per.14d'           = '14 dias'
         'per.30d'           = '30 dias'
-        'per.all'           = 'Tudo'
+        'per.all'           = 'Toda a temporada'
+        'season.word'       = 'Temporada'
+        'season.all'        = 'Todas as temporadas'
+        'season.matches'    = '{0} partidas'
 
         'tab.overview'      = 'Visão geral'
         'tab.matches'       = 'Partidas'
@@ -46,7 +51,8 @@ $script:MtStrings = @{
 
         'pl.sub'            = 'colocação média {0}   ·   {1} partidas'
         'pl.sub.doubt'      = '   ·   {0} com leitura espaçada'
-        'pl.rule'           = 'posição inferida pelo saldo:  1º >= +18   ·   2º +1 a +17   ·   3º -1 a -16   ·   4º <= -17'
+        'pl.rule'           = 'inferido do saldo:  1º a partir de +{0}   ·   3º/4º separados em {1} nesta faixa'
+        'pl.rule.learned'   = '   ·   corte aprendido das suas partidas'
 
         'ml.uncertain'      = 'leitura espaçada — pode somar mais de uma partida, colocação incerta'
         'ml.uncertain.s'    = 'leitura espaçada — colocação incerta'
@@ -110,10 +116,15 @@ $script:MtStrings = @{
         'hdr.streak.up'     = '{0} wins in a row'
         'hdr.streak.down'   = '{0} drops in a row'
 
-        'per.24h'           = '24h'
+        'per.24h'           = '24 hours'
+        'per.48h'           = '48 hours'
         'per.7d'            = '7 days'
+        'per.14d'           = '14 days'
         'per.30d'           = '30 days'
-        'per.all'           = 'All'
+        'per.all'           = 'Whole season'
+        'season.word'       = 'Season'
+        'season.all'        = 'All seasons'
+        'season.matches'    = '{0} matches'
 
         'tab.overview'      = 'Overview'
         'tab.matches'       = 'Matches'
@@ -138,7 +149,8 @@ $script:MtStrings = @{
 
         'pl.sub'            = 'avg place {0}   ·   {1} matches'
         'pl.sub.doubt'      = '   ·   {0} from a spaced reading'
-        'pl.rule'           = 'place inferred from net:  1st >= +18   ·   2nd +1 to +17   ·   3rd -1 to -16   ·   4th <= -17'
+        'pl.rule'           = 'inferred from net:  1st from +{0}   ·   3rd/4th split at {1} in this band'
+        'pl.rule.learned'   = '   ·   split learned from your own matches'
 
         'ml.uncertain'      = 'spaced reading — may cover more than one match, place uncertain'
         'ml.uncertain.s'    = 'spaced reading — place uncertain'

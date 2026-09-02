@@ -20,8 +20,8 @@ foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.La
 . ([scriptblock]::Create($defs.ToString()))
 
 $script:BaseInterval = 60; $script:MaxIdleInterval = 180; $script:CalibMinSamples = 5
-$script:MinGap = @{ Ts = -1; Value = 0; N = 0 }
 $script:MtChartPoints = 900
+Initialize-MtDefaults        # one source of truth for the query-layer constants
 $script:Db = if ($Database) { [MtSq]::OpenDb($Database) } else { Open-MtDb }
 $script:MtPeriods = @(
     @{ Key = '24h'; LabelKey = 'per.24h'; Secs = 86400 }
@@ -66,19 +66,31 @@ $total = [int](Invoke-MtQuery $script:Db 'SELECT COUNT(*) c FROM matches')[0]['c
 Write-Host "database: $total matches"
 
 Write-Host "`nplacement inference"
-Check 'boundaries land where the rule says' {
-    ((Get-MtPlacement 18) -eq 1) -and ((Get-MtPlacement 17) -eq 2) -and ((Get-MtPlacement 1) -eq 2) -and
-    ((Get-MtPlacement -1) -eq 3) -and ((Get-MtPlacement -16) -eq 3) -and ((Get-MtPlacement -17) -eq 4)
+Check 'the win boundary is fixed and sits in the empty stretch' {
+    # gains do not move with the ladder: 2nd +13..+16, 1st +25..+38
+    ((Get-MtPlacement 25 900) -eq 1) -and ((Get-MtPlacement 16 900) -eq 2) -and
+    ((Get-MtPlacement 32 3000) -eq 1) -and ((Get-MtPlacement 14 3000) -eq 2) -and
+    ((Get-MtPlacement 1 900) -eq 2)
 }
-Check 'no recorded delta sits within 2 of a boundary' {
-    $near = @((Invoke-MtQuery $script:Db 'SELECT DISTINCT delta FROM matches') |
-             ForEach-Object { [int]$_['delta'] } | Where-Object { $_ -in @(16,17,18,19,-15,-16,-17,-18) })
-    if ($near.Count) { Write-Host ("        near a boundary: " + ($near -join ', ')) }
-    $near.Count -eq 0
+Check 'the loss boundary rises with the trophy count' {
+    $tab = Get-MtSplitTable
+    $sobe = $true
+    for ($i = 1; $i -lt $tab.Length; $i++) { if ($tab[$i] -lt $tab[$i-1]) { $sobe = $false } }
+    # and a loss that means 3rd high up must mean 4th down low
+    $sobe -and ((Get-MtPlacement -12 3000) -eq 3) -and ((Get-MtPlacement -12 900) -eq 4)
+}
+Check 'every recorded loss is classified, none sit on the split' {
+    $tab = Get-MtSplitTable
+    $emcima = @()
+    foreach ($r in (Invoke-MtQuery $script:Db 'SELECT curr, delta FROM matches WHERE delta < 0')) {
+        $corte = $tab[(Get-MtBandIndex ([int]$r['curr']))]
+        if ([Math]::Abs([Math]::Abs([int]$r['delta']) - $corte) -lt 0.75) { $emcima += [int]$r['delta'] }
+    }
+    if ($emcima.Count) { Write-Host ("        sitting on the split: " + (($emcima | Sort-Object -Unique) -join ', ')) }
+    $emcima.Count -eq 0
 }
 Check 'the inlined copies agree with Get-MtPlacement' {
-    $rows = @(Get-MtRecent 0 0)
-    $bad = @($rows | Where-Object { $_.Place -ne (Get-MtPlacement $_.Delta) })
+    $bad = @(@(Get-MtRecent 0 0) | Where-Object { $_.Place -ne (Get-MtPlacement $_.Delta $_.Curr) })
     $bad.Count -eq 0
 }
 
@@ -196,13 +208,34 @@ Check 'every block stores its rows through AsMtArray' {
     if ($bad.Count) { foreach ($m in $bad) { Write-Host "        $($m.Value)" } }
     $bad.Count -eq 0
 }
-Check 'no query function returns through a leading comma' {
+Check 'the row-returning queries do not use a leading comma' {
     # a comma stops the unwrap: @(Get-MtX) becomes one item and an empty result
-    # becomes one phantom row
+    # becomes one phantom row. Get-MtSplitTable and AsMtArray return a single
+    # array on purpose and do need it.
     $src = Get-Content "$Root\MergeTactics.ps1" -Raw
-    $bad = @([regex]::Matches($src, '(?m)^\s+, \$'))
-    if ($bad.Count) { Write-Host "        $($bad.Count) found" }
+    $bad = @()
+    foreach ($fn in @('Get-MtSeries','Get-MtSessions','Get-MtSessionMatches','Get-MtRecent',
+                      'Get-MtDaily','Get-MtWeekly','Get-MtByHour','Get-MtByWeekday','Get-MtSeasons')) {
+        if ($src -match ("(?s)function $fn\(.*?\n\}")) {
+            if ($Matches[0] -match '(?m)^\s+, \$') { $bad += $fn }
+        }
+    }
+    if ($bad.Count) { Write-Host ("        " + ($bad -join ', ')) }
     $bad.Count -eq 0
+}
+Check 'the season filter narrows every query' {
+    $todas = @(Get-MtSeasons)
+    if ($todas.Count -lt 2) { return $true }
+    $keep = $script:MtSeasonId
+    try {
+        $script:MtSeasonId = 0
+        $tudo = (Get-MtStats 0).N
+        $soma = 0
+        foreach ($t in $todas) { $script:MtSeasonId = $t.Id; $soma += (Get-MtStats 0).N }
+        $script:MtSeasonId = $todas[0].Id
+        $uma = @(Get-MtRecent 0 0)
+        ($soma -eq $tudo) -and ($uma.Count -eq $todas[0].N)
+    } finally { $script:MtSeasonId = $keep }
 }
 
 Write-Host "`nstrings"

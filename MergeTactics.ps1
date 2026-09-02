@@ -86,6 +86,10 @@ $script:MtLang = if ($savedLang -in @('pt', 'en')) { $savedLang } else { Get-MtS
 # Minimising to the tray instead of the taskbar. On by default: the window
 # already lives in the tray, so a taskbar button for it is a second home.
 $script:MtToTray = ((Get-MtState $script:Db 'to_tray') -ne '0')
+# The panel opens on the current season: after a reset, mixing seasons draws a
+# cliff instead of a curve.
+$filtroSalvo = Get-MtState $script:Db 'season_filter'
+$script:MtSeasonId = if ($null -ne $filtroSalvo) { [int]$filtroSalvo } else { -1 }
 
 # In-memory state. Explicitly script-scoped, like every other value the
 # functions read: PowerShell resolves an unqualified name by walking the call
@@ -129,7 +133,6 @@ function Clear-MtAlert([string]$Key) {
 # Both interval decisions need the smallest real spacing between reliable
 # matches. It scans the whole history and ran twice a minute, so it is computed
 # once and kept until a new match lands.
-$script:MinGap = @{ Ts = -1; Value = 0; N = 0 }
 function Get-MtMinGap {
     if (-not (Test-Path variable:script:MinGap)) { $script:MinGap = @{ Ts = -1; Value = 0; N = 0 } }
     $last = [int](Invoke-MtQuery $script:Db "SELECT IFNULL(MAX(ts),0) m FROM matches")[0]['m']
@@ -149,10 +152,14 @@ function Get-MtSafeIdleInterval {
     if ($m.N -lt $script:CalibMinSamples -or $m.Value -eq 0) { return $script:BaseInterval }
     [Math]::Max($script:BaseInterval, [Math]::Min($script:MaxIdleInterval, [int]($m.Value / 2)))
 }
-function Get-MtCertaintyThreshold {
-    $m = Get-MtMinGap
-    if ($m.N -ge $script:CalibMinSamples -and $m.Value -gt 0) { return $m.Value }
-    $script:BaseInterval * 3
+# A reading can only hide a second match if it covers more time than a match
+# takes to play. Comparing it against the smallest gap ever seen between matches
+# was wrong: that gap is the polling interval, not a match duration. Once one
+# pair of matches landed 60 s apart the threshold became 60, the poll arrives
+# every 65, and every single reading was branded uncertain.
+function Get-MtCertaintyThreshold([int]$SampleSeconds = 0) {
+    $sample = if ($SampleSeconds -gt 0) { $SampleSeconds } else { $script:BaseInterval }
+    [Math]::Max($script:BaseInterval * 2, $sample * 2)
 }
 
 # ------------------------------------------------------------------ collection
@@ -222,6 +229,7 @@ function Invoke-MtPoll {
     }
     Set-MtState $script:Db 'best'      $best
     Set-MtState $script:Db 'season'    $seasonKey
+    if ($script:MtSeasonId -lt 0) { $script:MtSeasonId = $sid }
     Set-MtState $script:Db 'last_poll' $ts
     Set-MtState $script:Db 'name'      ([string]$resp['name'])
 
@@ -252,12 +260,12 @@ function Invoke-MtPoll {
 
     if ($delta -ne 0) {
         $gap = $ts - $prevTs
-        $certain = if ($gap -le (Get-MtCertaintyThreshold)) { 1 } else { 0 }
+        $certain = if ($gap -le (Get-MtCertaintyThreshold $script:State.CurrentInterval)) { 1 } else { 0 }
         Invoke-MtExec $script:Db ("INSERT OR REPLACE INTO matches (ts,season_id,curr,delta,gap_s,certain,sample_s)" +
                            " VALUES ($ts,$sid,$trophies,$delta,$gap,$certain,$($script:State.CurrentInterval))")
         $script:State.LastChange = $ts
         $sign = if ($delta -gt 0) { "+$delta" } else { "$delta" }
-        $place = Get-MtPlacement $delta
+        $place = Get-MtPlacement $delta $trophies
         Write-MtLog "MATCH $sign -> $trophies (place $place)"
         Show-MtToast 'Merge Tactics' ((L 'toast.match') -f (Get-MtOrd $place), $sign, $trophies, $arena)
     }
@@ -275,40 +283,183 @@ function Get-MtInterval {
 }
 
 # ------------------------------------------------------------------- placement
-# The API returns no final position, only the trophy delta. But the observed
-# deltas cluster into four bands that do not touch:
+# The API returns no final position, only the trophy delta. The deltas cluster,
+# and the clusters say this:
 #
-#     1st  >= +18      2nd  +1 to +17
-#     3rd  -1 to -16   4th  <= -17
+#   what you gain does not move with the ladder   2nd +13..+16   1st +25..+38
+#   what you lose scales with your trophy count, and 4th always takes about
+#   twice what 3rd takes (measured 1.90, 2.17 and 2.22 across three bands)
 #
-# The boundaries fell in empty stretches of the real history, so the inference is
-# stable. It is still inference: a reading flagged as spaced may cover two games
-# and land in the wrong band.
-$script:MtPlaceLabel = @('?', '1o', '2o', '3o', '4o')
+# So the win boundary is fixed and the loss boundary is not. A rule with fixed
+# loss thresholds found zero 4th places in 97 matches after a season reset put
+# the account back in Bronze. The split is therefore read from the player's own
+# history, per trophy band, and shown in the panel so it can be checked.
+# Constants the query layer needs. In one function so the app and Test.ps1 cannot
+# drift apart: the tests load only the function definitions, and a value defined
+# beside them at file scope would be missing there.
+function Initialize-MtDefaults {
+    $script:MtWinSplit  = 21     # +25..+38 and +13..+16 never came closer than this
+    $script:MtLossRatio = 1.5    # 4th takes ~2x 3rd, so the split sits halfway up
+    # The Starsteel Road, season 11: thirteen leagues from Bronze I to Diamond.
+    # mergetactics.gg/rewards lists the floors, and the arena changes this account
+    # recorded confirm them (Bronze II at 200, Bronze III at 400, Silver I at 700,
+    # Silver II at 1000). The site also states the shape the data shows: 1st pays
+    # about 30 and 2nd about 15 wherever you are, while what 3rd and 4th cost
+    # "scales with your current league". So the split is read per band.
+    $script:MtBands = @(0, 200, 400, 700, 1000, 1300, 1625, 2025, 2425, 2825, 3225, 3625, 4000)
+    $script:MtPlaceModel = $null
+    $script:MtPlaceModelAt = -1
+    $script:MinGap = @{ Ts = -1; Value = 0; N = 0 }
+    if (-not (Test-Path variable:script:MtSeasonId)) { $script:MtSeasonId = 0 }
+}
+Initialize-MtDefaults
 
-function Get-MtPlacement([int]$Delta) {
-    if ($Delta -ge 18)  { return 1 }
-    if ($Delta -gt 0)   { return 2 }
-    if ($Delta -ge -16) { return 3 }
-    4
+function Get-MtBandIndex([int]$Trophies) {
+    $i = 0
+    for ($k = 0; $k -lt $script:MtBands.Count; $k++) {
+        if ($Trophies -ge $script:MtBands[$k]) { $i = $k } else { break }
+    }
+    $i
+}
+
+# The 3rd/4th split per band, learned from the losses recorded in it. Cached
+# until a new match lands, because every row of every list needs it.
+function Get-MtPlaceModel {
+    $last = [int](Invoke-MtQuery $script:Db "SELECT IFNULL(MAX(ts),0) m FROM matches")[0]['m']
+    if ($null -ne $script:MtPlaceModel -and $script:MtPlaceModelAt -eq $last) { return $script:MtPlaceModel }
+
+    $porBanda = @{}
+    foreach ($r in (Invoke-MtQuery $script:Db "SELECT curr, delta FROM matches WHERE delta < 0")) {
+        $b = Get-MtBandIndex ([int]$r['curr'])
+        if (-not $porBanda.ContainsKey($b)) { $porBanda[$b] = New-Object 'System.Collections.Generic.List[int]' }
+        $porBanda[$b].Add([Math]::Abs([int]$r['delta']))
+    }
+    $split = @{}
+    foreach ($b in $porBanda.Keys) {
+        $v = @($porBanda[$b] | Sort-Object)
+        if ($v.Count -lt 6) { continue }
+        # widest gap in one dimension: the two clusters are tight and far apart
+        $corte = 0; $maior = 0
+        for ($i = 1; $i -lt $v.Count; $i++) {
+            $gap = $v[$i] - $v[$i-1]
+            if ($gap -gt $maior) { $maior = $gap; $corte = ($v[$i-1] + $v[$i]) / 2 }
+        }
+        $baixo = @($v | Where-Object { $_ -lt $corte })
+        $alto  = @($v | Where-Object { $_ -gt $corte })
+        # accept only a split that looks like the 2x relationship, otherwise the
+        # band saw one placement and the widest gap is just noise
+        $bom = $false
+        if ($baixo.Count -and $alto.Count) {
+            $mb = $baixo[[int]($baixo.Count / 2)]; $ma = $alto[[int]($alto.Count / 2)]
+            if ($mb -gt 0 -and ($ma / $mb) -ge 1.6) { $bom = $true }
+        }
+        $split[$b] = if ($bom) { $corte } else { $v[[int]($v.Count / 4)] * $script:MtLossRatio }
+    }
+    $script:MtPlaceModel = $split
+    $script:MtPlaceModelAt = $last
+    $split
+}
+
+# The middle of each band, used to place it on the trophy axis. The floor is no
+# good for this: the first band starts at zero and any ratio taken from it
+# collapses.
+function Get-MtBandMid([int]$b) {
+    $lo = $script:MtBands[$b]
+    $hi = if ($b + 1 -lt $script:MtBands.Count) { $script:MtBands[$b + 1] } else { $lo + 700 }
+    ($lo + $hi) / 2
+}
+
+# One split per band, every band resolved. Bands the player has never played get
+# an interpolation between the two nearest bands that do have history, and the
+# result is forced to rise with the trophy count: the loss grows with the ladder,
+# so a split that dipped would be an artefact, not a finding.
+function Get-MtSplitTable {
+    $model = Get-MtPlaceModel
+    $n = $script:MtBands.Count
+    $tab = New-Object 'double[]' $n
+    $sabidos = @($model.Keys | Sort-Object)
+    if (-not $sabidos.Count) {
+        for ($b = 0; $b -lt $n; $b++) { $tab[$b] = (Get-MtBandMid $b) * 0.007 + 2 }
+        return , $tab
+    }
+    for ($b = 0; $b -lt $n; $b++) {
+        if ($model.ContainsKey($b)) { $tab[$b] = [double]$model[$b]; continue }
+        $antes = -1; $depois = -1
+        foreach ($k in $sabidos) {
+            if ($k -lt $b) { $antes = $k }
+            elseif ($depois -lt 0) { $depois = $k }
+        }
+        $meu = Get-MtBandMid $b
+        if ($antes -ge 0 -and $depois -ge 0) {
+            $ma = Get-MtBandMid $antes; $md = Get-MtBandMid $depois
+            $f = ($meu - $ma) / [Math]::Max(1, $md - $ma)
+            $tab[$b] = [double]$model[$antes] + $f * ([double]$model[$depois] - [double]$model[$antes])
+        } elseif ($antes -ge 0) {
+            # above everything played: the loss keeps growing, so scale up
+            $tab[$b] = [double]$model[$antes] * $meu / [Math]::Max(1, (Get-MtBandMid $antes))
+        } else {
+            # below everything played: hold. Down there the trophy floor truncates
+            # the loss, so scaling down would push real 3rd places into 4th.
+            $tab[$b] = [double]$model[$depois]
+        }
+    }
+    for ($b = 1; $b -lt $n; $b++) { if ($tab[$b] -lt $tab[$b-1]) { $tab[$b] = $tab[$b-1] } }
+    , $tab
+}
+
+function Get-MtPlacement([int]$Delta, [int]$Trophies = 0) {
+    if ($Delta -ge $script:MtWinSplit) { return 1 }
+    if ($Delta -gt 0) { return 2 }
+    $tab = Get-MtSplitTable
+    if ([Math]::Abs($Delta) -lt $tab[(Get-MtBandIndex $Trophies)]) { 3 } else { 4 }
 }
 
 # --------------------------------------------------------------------- queries
 # All take a time window ($Since = 0 means everything), so the panel filters can
 # re-filter the same data without duplicating SQL.
 
+# The season is part of every filter. A reset puts the account back near zero,
+# so a chart that mixes seasons draws a cliff that means nothing.
+function Get-MtWhere([int]$Since) {
+    $c = @()
+    if ($Since -gt 0) { $c += "ts > $Since" }
+    if ($script:MtSeasonId -gt 0) { $c += "season_id = $script:MtSeasonId" }
+    if ($c.Count) { "WHERE " + ($c -join ' AND ') } else { "" }
+}
+
+# Seasons the database knows about, newest first, with what was played in each.
+function Get-MtSeasons {
+    $rows = Invoke-MtQuery $script:Db @"
+SELECT s.id, s.key, COUNT(m.ts) AS n, IFNULL(MIN(m.ts),0) AS de, IFNULL(MAX(m.ts),0) AS ate
+FROM seasons s LEFT JOIN matches m ON m.season_id = s.id
+GROUP BY s.id, s.key ORDER BY s.id DESC
+"@
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($r in $rows) {
+        # AutoChess_2026_Season_11 -> "Season 11"
+        $rotulo = [string]$r['key']
+        if ($rotulo -match 'Season[_ ]?(\d+)') { $rotulo = "$((L 'season.word')) $($Matches[1])" }
+        $out.Add([pscustomobject]@{
+            Id = [int]$r['id']; Key = [string]$r['key']; Label = $rotulo
+            N = [int]$r['n']; From = [int]$r['de']; To = [int]$r['ate']
+        })
+    }
+    $out.ToArray()
+}
+
 function Get-MtSummary([int]$Since = 0) {
     # The current value is the newest record, from snapshots or matches. Reading
     # snapshots alone left the header one step behind.
     # One pass over the union instead of two, and one read of state instead of
     # three: this runs on every poll and on every repaint.
+    $ws = Get-MtWhere 0
     $agg = Invoke-MtQuery $script:Db @"
-SELECT (SELECT v FROM (SELECT ts, trophies AS v FROM snapshots
-                       UNION ALL SELECT ts, curr AS v FROM matches)
+SELECT (SELECT v FROM (SELECT ts, trophies AS v FROM snapshots $ws
+                       UNION ALL SELECT ts, curr AS v FROM matches $ws)
         ORDER BY ts DESC LIMIT 1) AS atual,
-       (SELECT IFNULL(MAX(v),0) FROM (SELECT trophies AS v FROM snapshots
-                                      UNION ALL SELECT curr AS v FROM matches)) AS pico,
-       (SELECT COUNT(*) FROM matches) AS total
+       (SELECT IFNULL(MAX(v),0) FROM (SELECT trophies AS v FROM snapshots $ws
+                                      UNION ALL SELECT curr AS v FROM matches $ws)) AS pico,
+       (SELECT COUNT(*) FROM matches $ws) AS total
 "@
     $trophies = if ($agg.Count -and $agg[0]['atual']) { [int]$agg[0]['atual'] } else { 0 }
     $st = @{}
@@ -327,7 +478,7 @@ SELECT (SELECT v FROM (SELECT ts, trophies AS v FROM snapshots
 }
 
 function Get-MtStats([int]$Since = 0) {
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $r = Invoke-MtQuery $script:Db @"
 SELECT COUNT(*) n,
        IFNULL(SUM(delta),0) net,
@@ -348,8 +499,10 @@ FROM matches $w
 # Distribution of inferred placements, plus the observed delta range for each
 # position: visible evidence that the inference matches the data.
 function Get-MtPlacements([int]$Since = 0) {
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
-    $rows = Invoke-MtQuery $script:Db "SELECT delta, certain FROM matches $w"
+    $w = Get-MtWhere $Since
+    $rows = Invoke-MtQuery $script:Db "SELECT curr, delta, certain FROM matches $w"
+    $tab = Get-MtSplitTable
+    $bandas = $script:MtBands
     $cnt = @(0, 0, 0, 0, 0)
     $lo  = @(0, 0, 0, 0, 0)
     $hi  = @(0, 0, 0, 0, 0)
@@ -357,8 +510,12 @@ function Get-MtPlacements([int]$Since = 0) {
     $uncertain = 0
     $sum = 0
     foreach ($r in $rows) {
-        $d = [int]$r['delta']
-        $p = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
+        $d = [int]$r['delta']; $cu = [int]$r['curr']
+        $p = if ($d -ge $script:MtWinSplit) { 1 } elseif ($d -gt 0) { 2 } else {
+            $b = 0
+            for ($k = 0; $k -lt $bandas.Count; $k++) { if ($cu -ge $bandas[$k]) { $b = $k } else { break } }
+            if ([Math]::Abs($d) -lt $tab[$b]) { 3 } else { 4 }
+        }
         $cnt[$p]++
         $sum += $p
         if ([int]$r['certain'] -ne 1) { $uncertain++ }
@@ -380,17 +537,24 @@ function Get-MtPlacements([int]$Since = 0) {
             Seen  = $seen[$p]
         }
     }
+    # the split in force where the player is now, so the panel can state it
+    $ultimo = Invoke-MtQuery $script:Db "SELECT curr FROM matches $w ORDER BY ts DESC LIMIT 1"
+    $onde = if ($ultimo.Count) { [int]$ultimo[0]['curr'] } else { 0 }
+    $banda = Get-MtBandIndex $onde
     @{
         Rows    = $out
         Total   = $tot
         Uncertain  = $uncertain
         Avg     = if ($tot) { [math]::Round($sum / $tot, 2) } else { 0 }
         Top2Pct = if ($tot) { [int][math]::Round(($cnt[1] + $cnt[2]) * 100 / $tot) } else { 0 }
+        WinSplit  = $script:MtWinSplit
+        LossSplit = $tab[$banda]
+        Learned   = (Get-MtPlaceModel).ContainsKey($banda)
     }
 }
 
 function Get-MtSeries([int]$Since = 0, [int]$MaxPoints = 0) {
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = Invoke-MtQuery $script:Db @"
 SELECT ts, trophies AS v FROM snapshots $w
 UNION ALL
@@ -439,10 +603,12 @@ ORDER BY ts
 # Play sessions: matches less than 30 min apart belong to the same session. That
 # is the unit a player actually feels, and no screen in the game shows it.
 function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = (Invoke-MtQuery $script:Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts")
     if ($rows.Count -eq 0) { return @() }
     $gap = $GapMin * 60
+    $tab = Get-MtSplitTable
+    $bandas = $script:MtBands
     # Lists, not arrays: $out += copies the whole array on every append, which
     # turned one season of history into 300 ms of pure copying.
     $out = New-Object 'System.Collections.Generic.List[object]'
@@ -451,7 +617,11 @@ function Get-MtSessions([int]$Since = 0, [int]$GapMin = 30) {
         $ts = [int]$r['ts']; $d = [int]$r['delta']; $c = [int]$r['curr']
         $ct = [int]$r['certain']
         # placement inlined: a function call costs ~8 us and this runs per match
-        $pl = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
+        $pl = if ($d -ge $script:MtWinSplit) { 1 } elseif ($d -gt 0) { 2 } else {
+            $b = 0
+            for ($k = 0; $k -lt $bandas.Count; $k++) { if ($c -ge $bandas[$k]) { $b = $k } else { break } }
+            if ([Math]::Abs($d) -lt $tab[$b]) { 3 } else { 4 }
+        }
         if ($null -eq $cur -or ($ts - $cur.End) -gt $gap) {
             if ($cur) { $out.Add($cur) }
             $cur = [pscustomobject]@{
@@ -485,12 +655,17 @@ function Get-MtSessionMatches([int]$Start, [int]$End) {
 SELECT ts, delta, curr, certain FROM matches
 WHERE ts >= $Start AND ts <= $End ORDER BY ts DESC
 "@
+    $tab = Get-MtSplitTable
+    $bandas = $script:MtBands
     $out = New-Object 'System.Collections.Generic.List[object]'
     foreach ($r in $rows) {
-        $d = [int]$r['delta']
+        $d = [int]$r['delta']; $cu = [int]$r['curr']
+        $b = 0
+        for ($k = 0; $k -lt $bandas.Count; $k++) { if ($cu -ge $bandas[$k]) { $b = $k } else { break } }
         $out.Add([pscustomobject]@{
-            Ts = [int]$r['ts']; Delta = $d; Curr = [int]$r['curr']; Certain = [int]$r['certain']
-            Place = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
+            Ts = [int]$r['ts']; Delta = $d; Curr = $cu; Certain = [int]$r['certain']
+            Place = if ($d -ge $script:MtWinSplit) { 1 } elseif ($d -gt 0) { 2 }
+                    elseif ([Math]::Abs($d) -lt $tab[$b]) { 3 } else { 4 }
         })
     }
     $out.ToArray()
@@ -499,7 +674,7 @@ WHERE ts >= $Start AND ts <= $End ORDER BY ts DESC
 # Performance by hour of day. No other source crosses these two.
 function Get-MtByHour([int]$Since = 0) {
     $off = Get-MtTzOffset
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = (Invoke-MtQuery $script:Db @"
 SELECT CAST(strftime('%H', ts + $off, 'unixepoch') AS INTEGER) AS h,
        COUNT(*) AS n, SUM(delta) AS net
@@ -524,7 +699,7 @@ FROM matches $w GROUP BY h ORDER BY h
 # Performance by weekday.
 function Get-MtByWeekday([int]$Since = 0) {
     $off = Get-MtTzOffset
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = Invoke-MtQuery $script:Db @"
 SELECT CAST(strftime('%w', ts + $off, 'unixepoch') AS INTEGER) AS d,
        COUNT(*) AS n, SUM(delta) AS net
@@ -557,7 +732,7 @@ FROM matches ORDER BY ts
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine('timestamp,local_time,delta,trophies,place,gap_s,reliable,interval_s')
     foreach ($r in $rows) {
-        $place = Get-MtPlacement ([int]$r['delta'])
+        $place = Get-MtPlacement ([int]$r['delta']) ([int]$r['curr'])
         [void]$sb.AppendLine("$($r['ts']),$($r['local_time']),$($r['delta']),$($r['curr']),$place,$($r['gap_s']),$($r['certain']),$($r['sample_s'])")
     }
     [System.IO.File]::WriteAllText($Path, $sb.ToString(), (New-Object System.Text.UTF8Encoding $true))
@@ -567,7 +742,7 @@ FROM matches ORDER BY ts
 # Longest win and loss streaks in the period. Get-MtStreak answers "how am I
 # doing now"; these two answer "how far did it ever go".
 function Get-MtStreaks([int]$Since = 0) {
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = Invoke-MtQuery $script:Db "SELECT delta FROM matches $w ORDER BY ts"
     $maxWin = 0; $maxLoss = 0; $v = 0; $q = 0
     foreach ($r in $rows) {
@@ -580,7 +755,7 @@ function Get-MtStreaks([int]$Since = 0) {
 
 # Current run of same-signed results.
 function Get-MtStreak {
-    $rows = Invoke-MtQuery $script:Db "SELECT delta FROM matches ORDER BY ts DESC LIMIT 40"
+    $rows = Invoke-MtQuery $script:Db "SELECT delta FROM matches $(Get-MtWhere 0) ORDER BY ts DESC LIMIT 40"
     $all = @($rows)
     if ($all.Count -eq 0) { return @{ N = 0; Up = $true } }
     $up = ([int]$all[0]['delta'] -gt 0)
@@ -602,7 +777,7 @@ function Get-MtTzOffset {
 
 function Get-MtDaily([int]$Since = 0, [int]$Max = 14) {
     $off = Get-MtTzOffset
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = Invoke-MtQuery $script:Db @"
 SELECT date(ts + $off, 'unixepoch') AS d, COUNT(*) AS n, SUM(delta) AS net
 FROM matches $w GROUP BY d ORDER BY d DESC LIMIT $Max
@@ -616,7 +791,7 @@ FROM matches $w GROUP BY d ORDER BY d DESC LIMIT $Max
 
 function Get-MtWeekly([int]$Since = 0, [int]$Max = 10) {
     $off = Get-MtTzOffset
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $rows = Invoke-MtQuery $script:Db @"
 SELECT strftime('%Y-W%W', ts + $off, 'unixepoch') AS wk, COUNT(*) AS n, SUM(delta) AS net
 FROM matches $w GROUP BY wk ORDER BY wk DESC LIMIT $Max
@@ -630,16 +805,21 @@ FROM matches $w GROUP BY wk ORDER BY wk DESC LIMIT $Max
 
 # $Limit = 0 returns the whole history (the Matches tab scrolls through it).
 function Get-MtRecent([int]$Since = 0, [int]$Limit = 5) {
-    $w = if ($Since -gt 0) { "WHERE ts > $Since" } else { "" }
+    $w = Get-MtWhere $Since
     $lim = if ($Limit -gt 0) { "LIMIT $Limit" } else { "" }
     $rows = Invoke-MtQuery $script:Db "SELECT ts, delta, curr, certain FROM matches $w ORDER BY ts DESC $lim"
+    $tab = Get-MtSplitTable
+    $bandas = $script:MtBands
     $out = New-Object 'System.Collections.Generic.List[object]'
     foreach ($r in $rows) {
-        $d = [int]$r['delta']
+        $d = [int]$r['delta']; $cu = [int]$r['curr']
+        $b = 0
+        for ($k = 0; $k -lt $bandas.Count; $k++) { if ($cu -ge $bandas[$k]) { $b = $k } else { break } }
         $out.Add([pscustomobject]@{
             Ts = [int]$r['ts']; Delta = $d
-            Curr = [int]$r['curr']; Certain = [int]$r['certain']
-            Place = if ($d -ge 18) { 1 } elseif ($d -gt 0) { 2 } elseif ($d -ge -16) { 3 } else { 4 }
+            Curr = $cu; Certain = [int]$r['certain']
+            Place = if ($d -ge $script:MtWinSplit) { 1 } elseif ($d -gt 0) { 2 }
+                    elseif ([Math]::Abs($d) -lt $tab[$b]) { 3 } else { 4 }
         })
     }
     $out.ToArray()
@@ -770,13 +950,26 @@ function Invoke-MtExport {
 # Filter periods. Secs = 0 means the whole history.
 $script:MtPeriods = @(
     @{ Key = '24h'; LabelKey = 'per.24h'; Secs = 86400 }
+    @{ Key = '48h'; LabelKey = 'per.48h'; Secs = 172800 }
     @{ Key = '7d';  LabelKey = 'per.7d';  Secs = 604800 }
+    @{ Key = '14d'; LabelKey = 'per.14d'; Secs = 1209600 }
     @{ Key = '30d'; LabelKey = 'per.30d'; Secs = 2592000 }
     @{ Key = 'all'; LabelKey = 'per.all'; Secs = 0 }
 )
 # labels resolve when the panel opens, in the current language
 function Get-MtPeriodOptions {
-    @($script:MtPeriods | ForEach-Object { @{ Key = $_.Key; Label = (L $_.LabelKey); Secs = $_.Secs } })
+    @($script:MtPeriods | ForEach-Object {
+        [pscustomobject]@{ Key = $_.Key; Label = (L $_.LabelKey); Note = '' } })
+}
+
+function Get-MtSeasonOptions {
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($t in (Get-MtSeasons)) {
+        $out.Add([pscustomobject]@{ Key = [string]$t.Id; Label = $t.Label
+                                    Note = (L 'season.matches') -f $t.N })
+    }
+    $out.Add([pscustomobject]@{ Key = '0'; Label = (L 'season.all'); Note = '' })
+    $out.ToArray()
 }
 $script:MtPeriod = 'all'
 $script:MtPeriodPrev = 'all'
@@ -835,6 +1028,16 @@ function Update-MtPanelData([string]$periodKey) {
     foreach ($k in @($script:MtStale.Keys)) { $script:MtStale[$k] = $true }
     Update-MtTabData $script:MtTab $since $reset
     Update-MtFooter
+}
+
+# Switching season invalidates every block, including the ones already built.
+function Set-MtSeason([int]$id) {
+    if ($id -eq $script:MtSeasonId) { return }
+    $script:MtSeasonId = $id
+    Set-MtState $script:Db 'season_filter' ([string]$id)
+    foreach ($k in @($script:MtStale.Keys)) { $script:MtStale[$k] = $true }
+    $script:MtPeriodPrev = ''      # forces the lists back to the top
+    Update-MtPanelData $script:MtPeriod
 }
 
 # Builds one tab's blocks, if they are stale. Called by Update-MtPanelData for
@@ -960,8 +1163,14 @@ function Show-MtPanelCore {
         $cx += 106
     }
 
-    $filter = New-MtFilterBar (Get-MtPeriodOptions) $script:MtPeriod { param($k) Update-MtPanelData $k } 380 32
-    $filter.Location = New-Object System.Drawing.Point 26, 152
+    $season = New-MtDropdown (Get-MtSeasonOptions) ([string]$script:MtSeasonId) `
+                             { param($k) Set-MtSeason ([int]$k) } 170 30
+    $season.Location = New-Object System.Drawing.Point 26, 152
+    $f.Controls.Add($season)
+
+    $filter = New-MtDropdown (Get-MtPeriodOptions) $script:MtPeriod `
+                             { param($k) Update-MtPanelData $k } 150 30
+    $filter.Location = New-Object System.Drawing.Point 204, 152
     $f.Controls.Add($filter)
 
     $tabs = New-MtTabs @((L 'tab.overview'), (L 'tab.matches'), (L 'tab.sessions'), (L 'tab.hours')) `
@@ -1026,7 +1235,7 @@ function Show-MtPanelCore {
 
     $script:PanelParts = @{
         Cards = $cards; Chart = $chart; Daily = $daily; Header = $hdr
-        Places = $places; List = $list; Full = $full; Footer = $ft; Filter = $filter
+        Places = $places; List = $list; Full = $full; Footer = $ft; Filter = $filter; Season = $season
         Sessions = $sessions; Hours = $hours; Wdays = $wdays; Tabs = $tabs
     }
 
