@@ -43,16 +43,26 @@ A API não devolve a posição final da partida, só o saldo de troféus. Mas os
 saldos observados se agrupam em quatro faixas que não se tocam, e cada faixa é
 uma colocação:
 
-| Colocação | Saldo | Observado (74 partidas) |
-|---|---|---|
-| 1º | `>= +18` | +25 … +38 |
-| 2º | `+1 a +17` | +14 … +15 |
-| 3º | `-1 a -16` | -14 … -11 |
-| 4º | `<= -17` | -29 … -22 |
+O que você **ganha** não muda com a ladder: 2º paga +13…+16 e 1º paga +25…+38,
+esteja você no Bronze ou no Diamante. O que você **perde** escala com os
+troféus, e o 4º sempre tira cerca do dobro do 3º — medido em 1,90, 2,17 e 2,22
+em três faixas de troféus.
 
-Nenhum saldo do histórico cai perto de uma fronteira, então a inferência é
-estável. O painel mostra a faixa observada ao lado de cada posição — dá para
-conferir a regra contra os seus próprios dados em vez de acreditar nela.
+Então a fronteira das vitórias é fixa e a das derrotas não é. Uma regra com
+limites fixos de perda achou *zero* 4º lugares em 97 partidas depois que a
+virada de temporada devolveu a conta ao Bronze. Por isso o corte é lido do seu
+próprio histórico, uma faixa por liga, e o painel imprime o corte em vigor para
+você conferir.
+
+| Colocação | Saldo | Perto de 900 troféus | Perto de 3000 |
+|---|---|---|---|
+| 1º | `>= +21` | +28 … +32 | +25 … +38 |
+| 2º | `+1 a +20` | +13 … +16 | +14 … +15 |
+| 3º | perda pequena | -1 … -7 | -11 … -14 |
+| 4º | ~2x isso | -9 … -13 | -22 … -29 |
+
+Limiares de liga conferidos contra as trocas de arena que esta conta registrou:
+Bronze II em 200, Bronze III em 400, Silver I em 700, Silver II em 1000.
 
 Leituras marcadas como espaçadas podem somar mais de uma partida; nelas a
 colocação aparece com borda pontilhada e aviso.
@@ -81,8 +91,10 @@ horário você rende mais; nenhuma outra fonte cruza isso.
 
 ![Horários](docs/pt-BR/hours.png)
 
-O filtro de período no topo (**24h / 7 dias / 30 dias / Tudo**) refiltra todos
-os blocos de uma vez.
+Dois seletores no topo filtram tudo de uma vez: a **temporada** e o período
+dentro dela (24 horas até 30 dias, ou a temporada inteira). Uma virada de
+temporada devolve a conta para perto do zero, então o painel abre na temporada
+corrente — misturar temporadas num gráfico só desenha um penhasco.
 
 ## Português e inglês
 

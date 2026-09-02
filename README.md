@@ -21,16 +21,25 @@ placements, and time-of-day performance.
 position pays, but the observed trophy deltas cluster into four bands that do
 not overlap:
 
-| Place | Trophy delta | Observed (74 matches) |
-|---|---|---|
-| 1st | `>= +18` | +25 … +38 |
-| 2nd | `+1 … +17` | +14 … +15 |
-| 3rd | `-1 … -16` | -14 … -11 |
-| 4th | `<= -17` | -29 … -22 |
+What you **gain** does not move with the ladder: 2nd pays +13…+16 and 1st pays
++25…+38 whether you are in Bronze or in Diamond. What you **lose** scales with
+your trophy count, and 4th always takes about twice what 3rd takes — measured at
+1.90, 2.17 and 2.22 across three trophy bands.
 
-No delta in the history lands anywhere near a boundary, so the mapping is
-stable. The panel shows the observed range next to each position, so you can
-check the inference against your own data rather than trusting it.
+So the win boundary is fixed and the loss boundary is not. A rule with fixed loss
+thresholds found *zero* 4th places in 97 matches after a season reset dropped the
+account back to Bronze. The split is therefore read from your own history, one
+band per league, and the panel prints the split in force so you can check it.
+
+| Place | Net | At ~900 trophies | At ~3000 trophies |
+|---|---|---|---|
+| 1st | `>= +21` | +28 … +32 | +25 … +38 |
+| 2nd | `+1 … +20` | +13 … +16 | +14 … +15 |
+| 3rd | small loss | -1 … -7 | -11 … -14 |
+| 4th | ~2x that | -9 … -13 | -22 … -29 |
+
+League thresholds confirmed against this account's own arena changes: Bronze II
+at 200, Bronze III at 400, Silver I at 700, Silver II at 1000.
 
 ## What you get
 
@@ -53,8 +62,10 @@ well; nothing else crosses those two.
 
 ![Hours](docs/hours.png)
 
-Every block re-filters at once through the period pills at the top
-(24h / 7 days / 30 days / All).
+Two dropdowns at the top filter everything at once: the **season**, and the
+period within it (24 hours through 30 days, or the whole season). A season reset
+puts the account back near zero, so the panel opens on the current season —
+mixing seasons in one chart draws a cliff rather than a curve.
 
 ## English and Portuguese
 

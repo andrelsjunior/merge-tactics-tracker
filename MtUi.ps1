@@ -251,6 +251,151 @@ function New-MtStatCard([string]$label, [string]$value, $color, [string]$icon, [
     $p
 }
 
+# -------------------------------------------------------------------- dropdown
+# Two dimensions to filter by now, season and period, and a row of pills does not
+# hold both. The native ComboBox does not take a dark theme, so the closed box is
+# drawn here and the open list is a borderless form placed under it.
+function New-MtDropdown($options, $selected, [scriptblock]$onChange, [int]$w, [int]$h = 30) {
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Size = New-Object System.Drawing.Size $w, $h
+    $p.BackColor = $script:T.Bg
+    $p.Cursor = 'Hand'
+    $p.Tag = @{ Options = @($options); Selected = $selected; OnChange = $onChange; Hot = $false; Open = $false }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = 'AntiAlias'
+        $g.TextRenderingHint = 'ClearTypeGridFit'
+        $d = $s.Tag
+        $W = $s.Width; $H = $s.Height
+        $path = New-MtRoundPath 0.5 0.5 ($W - 1) ($H - 1) 9
+        $fundo = New-Object System.Drawing.SolidBrush $(if ($d.Hot -or $d.Open) { $script:T.Raised } else { $script:T.Surface })
+        $g.FillPath($fundo, $path); $fundo.Dispose()
+        $pen = New-Object System.Drawing.Pen $(if ($d.Open) { $script:T.Royal } else { $script:T.Border }), 1
+        $g.DrawPath($pen, $path); $pen.Dispose(); $path.Dispose()
+
+        $atual = @($d.Options | Where-Object { $_.Key -eq $d.Selected } | Select-Object -First 1)
+        $texto = if ($atual.Count) { $atual[0].Label } else { '' }
+        $f = New-MtFont 9 'Bold'
+        $b = New-Object System.Drawing.SolidBrush $script:T.Text
+        $sf = New-Object System.Drawing.StringFormat
+        $sf.LineAlignment = 'Center'
+        $sf.Trimming = 'EllipsisCharacter'
+        $sf.FormatFlags = 'NoWrap'
+        $g.DrawString($texto, $f, $b, (New-Object System.Drawing.RectangleF 12, 0, ($W - 34), $H), $sf)
+        $f.Dispose(); $b.Dispose(); $sf.Dispose()
+
+        $seta = New-Object System.Drawing.Pen $script:T.Dim, 2
+        $seta.StartCap = 'Round'; $seta.EndCap = 'Round'
+        $cx = $W - 20; $cy = [int]($H / 2) - 1
+        $g.DrawLine($seta, $cx, $cy, ($cx + 4), ($cy + 4))
+        $g.DrawLine($seta, ($cx + 4), ($cy + 4), ($cx + 8), $cy)
+        $seta.Dispose()
+    })
+    $p.Add_MouseEnter({ param($s, $e) $s.Tag.Hot = $true;  $s.Invalidate() })
+    $p.Add_MouseLeave({ param($s, $e) $s.Tag.Hot = $false; $s.Invalidate() })
+    $p.Add_MouseClick({ param($s, $e) Show-MtDropdownList $s })
+    $p
+}
+
+# The open list. A borderless form so it can spill outside the panel it belongs
+# to; it closes on pick, on losing focus, and on Escape.
+function Show-MtDropdownList($botao) {
+    $d = $botao.Tag
+    if ($d.Open) { return }
+    $opts = @($d.Options)
+    if (-not $opts.Count) { return }
+    $rh = 28
+    $alturaMax = 320
+    $alturaTotal = [Math]::Min($alturaMax, $opts.Count * $rh + 10)
+
+    $lista = New-Object System.Windows.Forms.Form
+    $lista.FormBorderStyle = 'None'
+    $lista.ShowInTaskbar = $false
+    $lista.StartPosition = 'Manual'
+    $lista.BackColor = $script:T.BgDeep
+    $lista.Size = New-Object System.Drawing.Size ([Math]::Max(180, $botao.Width)), $alturaTotal
+    $canto = $botao.PointToScreen((New-Object System.Drawing.Point 0, $botao.Height))
+    $lista.Location = New-Object System.Drawing.Point $canto.X, ($canto.Y + 2)
+
+    $tela = New-Object System.Windows.Forms.Panel
+    $tela.Dock = 'Fill'
+    $tela.BackColor = $script:T.BgDeep
+    $tela.Tag = @{ Options = $opts; Selected = $d.Selected; Hot = -1; RowH = $rh }
+    $tela.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = 'AntiAlias'
+        $g.TextRenderingHint = 'ClearTypeGridFit'
+        $st = $s.Tag
+        $path = New-MtRoundPath 0.5 0.5 ($s.Width - 1) ($s.Height - 1) 9
+        $bg = New-Object System.Drawing.SolidBrush $script:T.Surface
+        $g.FillPath($bg, $path); $bg.Dispose()
+        $pen = New-Object System.Drawing.Pen $script:T.BorderLit, 1
+        $g.DrawPath($pen, $path); $pen.Dispose(); $path.Dispose()
+        $f = New-MtFont 9
+        $fb = New-MtFont 9 'Bold'
+        $fsm = New-MtFont 7.5
+        $y = 5
+        for ($i = 0; $i -lt @($st.Options).Count; $i++) {
+            $o = $st.Options[$i]
+            $sel = ($o.Key -eq $st.Selected)
+            if ($sel -or $st.Hot -eq $i) {
+                $rp = New-MtRoundPath 4 $y ($s.Width - 8) ($st.RowH - 2) 6
+                $rb = New-Object System.Drawing.SolidBrush $(if ($sel) { $script:T.Royal } else { $script:T.Raised })
+                $g.FillPath($rb, $rp); $rb.Dispose(); $rp.Dispose()
+            }
+            $tc = if ($sel) { [System.Drawing.Color]::White } else { $script:T.Text }
+            $tb = New-Object System.Drawing.SolidBrush $tc
+            $g.DrawString($o.Label, $(if ($sel) { $fb } else { $f }), $tb, 14, ($y + 5))
+            $tb.Dispose()
+            if ($o.PSObject.Properties['Note'] -and $o.Note) {
+                $nb = New-Object System.Drawing.SolidBrush $(if ($sel) { $script:T.Text } else { $script:T.Faint })
+                $sf = New-Object System.Drawing.StringFormat
+                $sf.Alignment = 'Far'
+                $g.DrawString($o.Note, $fsm, $nb, (New-Object System.Drawing.RectangleF 0, ($y + 8), ($s.Width - 14), 14), $sf)
+                $nb.Dispose(); $sf.Dispose()
+            }
+            $y += $st.RowH
+        }
+        $f.Dispose(); $fb.Dispose(); $fsm.Dispose()
+    })
+    $tela.Add_MouseMove({
+        param($s, $e)
+        $i = [int](($e.Y - 5) / $s.Tag.RowH)
+        if ($i -lt 0 -or $i -ge @($s.Tag.Options).Count) { $i = -1 }
+        if ($i -ne $s.Tag.Hot) { $s.Tag.Hot = $i; $s.Invalidate() }
+    })
+    $tela.Add_MouseLeave({ param($s, $e) $s.Tag.Hot = -1; $s.Invalidate() })
+    $tela.Add_MouseClick({
+        param($s, $e)
+        $i = [int](($e.Y - 5) / $s.Tag.RowH)
+        $opts = @($s.Tag.Options)
+        if ($i -ge 0 -and $i -lt $opts.Count) {
+            $frm = $s.FindForm()
+            $frm.Tag = $opts[$i].Key
+            $frm.Close()
+        }
+    })
+    $lista.Controls.Add($tela)
+    $lista.Add_Deactivate({ param($src, $e) $src.Close() })
+    $lista.KeyPreview = $true
+    $lista.Add_KeyDown({ param($src, $e) if ($e.KeyCode -eq 'Escape') { $src.Tag = $null; $src.Close() } })
+
+    $d.Open = $true
+    $botao.Invalidate()
+    [void]$lista.ShowDialog()
+    $escolha = $lista.Tag
+    $lista.Dispose()
+    $d.Open = $false
+    $botao.Invalidate()
+    if ($escolha -and $escolha -ne $d.Selected) {
+        $d.Selected = $escolha
+        $botao.Invalidate()
+        & $d.OnChange $escolha
+    }
+}
+
 # ----------------------------------------------------------------- filter pills
 function New-MtFilterBar($options, [string]$selected, [scriptblock]$onChange, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
@@ -359,6 +504,8 @@ function New-MtAreaChart($series, [int]$w, [int]$h) {
         if ($mx -eq $mn) { $mx = $mn + 1 }
         $pad = [Math]::Max(1, ($mx - $mn) * 0.18)
         $lo = $mn - $pad; $hi = $mx + $pad
+        # trophies do not go below zero, and an axis that says -182 is noise
+        if ($mn -ge 0 -and $lo -lt 0) { $lo = 0 }
         $plotH = $H - $padT - $padB
         $plotW = $W - $padL - $padR
 
@@ -545,7 +692,10 @@ function New-MtPlacementChart($pack, [int]$w, [int]$h) {
             $y += $rh
         }
 
-        $g.DrawString((L 'pl.rule'), $fsm, $bd, 18, ($H - 17))
+        # the footer states the split actually in use, not a rule from a past season
+        $regra = (L 'pl.rule') -f $pack.WinSplit, ("{0:N1}" -f $pack.LossSplit)
+        if ($pack.Learned) { $regra += L 'pl.rule.learned' }
+        $g.DrawString($regra, $fsm, $bd, 18, ($H - 17))
 
         $f.Dispose(); $fsm.Dispose(); $fb.Dispose(); $bd.Dispose(); $bdim.Dispose()
         $g.ResetClip()

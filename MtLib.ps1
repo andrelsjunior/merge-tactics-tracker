@@ -100,7 +100,25 @@ function Open-MtDb {
         $s = $stmt.Trim()
         if ($s) { [MtSq]::Exec($db, $s) }
     }
+    Update-MtDbVersion $db
     $db
+}
+
+# Schema and data migrations, applied once and recorded.
+function Update-MtDbVersion($db) {
+    $r = Invoke-MtQuery $db "SELECT v FROM state WHERE k='db_version'"
+    $v = if ($r.Count) { [int]$r[0]['v'] } else { 0 }
+
+    if ($v -lt 1) {
+        # 'certain' used to compare the reading interval against the smallest gap
+        # ever seen between matches. Those are different quantities: once a pair
+        # of matches landed 60 s apart the threshold became 60, the poll arrives
+        # every 65, and every reading was branded uncertain. Recompute from the
+        # interval that was actually in effect, which is stored per row.
+        [MtSq]::Exec($db, "UPDATE matches SET certain = CASE
+            WHEN gap_s <= MAX(120, sample_s * 2) THEN 1 ELSE 0 END")
+        [MtSq]::Exec($db, "INSERT OR REPLACE INTO state (k,v) VALUES ('db_version','1')")
+    }
 }
 
 function Invoke-MtExec($db, [string]$sql)  { [MtSq]::Exec($db, $sql) }
