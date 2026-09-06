@@ -8,6 +8,14 @@ Set-StrictMode -Version Latest
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class MtGdi {
+  [DllImport("user32.dll")] static extern int GetGuiResources(IntPtr h, int flags);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  public static int Count(){ return GetGuiResources(GetCurrentProcess(), 0); }
+}
+"@ -ErrorAction SilentlyContinue
 . "$Root\MtLib.ps1"; . "$Root\MtI18n.ps1"; . "$Root\MtUi.ps1"
 
 # Only the function definitions of the app: running the file would start it.
@@ -293,6 +301,46 @@ Check 'an expanded session paints its matches' {
     $filled = ($null -ne $p.Tag.Rows[0].Matches)
     $bmp.Dispose(); $p.Dispose()
     $filled
+}
+
+Write-Host "`nhandles"
+Check 'building the tray icon leaks no GDI objects' {
+    # GetHicon hands back a raw OS handle that Icon.Dispose does not free. Left
+    # alone it leaked ~3 objects a minute and hit the 10.000 per-process ceiling
+    # in under three days, after which the app could not build a cursor.
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    $antes = [MtGdi]::Count()
+    for ($i = 0; $i -lt 300; $i++) { $ico = New-MtTrayIcon (1000 + $i); $ico.Dispose() }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    $cresceu = [MtGdi]::Count() - $antes
+    if ($cresceu -gt 20) { Write-Host "        grew by $cresceu over 300 icons" }
+    $cresceu -le 20
+}
+Check 'painting every block repeatedly leaks no GDI objects' {
+    $blocos = @(
+        (New-MtAreaChart (Get-MtSeries 0 900) 868 214),
+        (New-MtPlacementChart (Get-MtPlacements 0) 422 176),
+        (New-MtMatchList (Get-MtRecent 0 0) 868 584 'sec.history'),
+        (New-MtSessionList (Get-MtSessions 0) 868 584 { param($a,$b) Get-MtSessionMatches $a $b }),
+        (New-MtHourChart (Get-MtByHour 0) 868 300),
+        (New-MtHeader (Get-MtSummary 0) 440 82))
+    $bmps = @(); $rects = @()
+    foreach ($p in $blocos) {
+        $bmps += (New-Object System.Drawing.Bitmap $p.Width, $p.Height)
+        $rects += (New-Object System.Drawing.Rectangle 0, 0, $p.Width, $p.Height)
+    }
+    for ($i = 0; $i -lt $blocos.Count; $i++) { $blocos[$i].DrawToBitmap($bmps[$i], $rects[$i]) }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    $antes = [MtGdi]::Count()
+    for ($n = 0; $n -lt 40; $n++) {
+        for ($i = 0; $i -lt $blocos.Count; $i++) { $blocos[$i].DrawToBitmap($bmps[$i], $rects[$i]) }
+    }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    $cresceu = [MtGdi]::Count() - $antes
+    foreach ($b in $bmps) { $b.Dispose() }
+    foreach ($p in $blocos) { $p.Dispose() }
+    if ($cresceu -gt 30) { Write-Host "        grew by $cresceu over 240 paints" }
+    $cresceu -le 30
 }
 
 Write-Host "`nscrolling"

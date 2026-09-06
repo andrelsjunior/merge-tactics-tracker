@@ -844,16 +844,38 @@ function New-MtTrayIcon([int]$Trophies) {
     $sf = New-Object System.Drawing.StringFormat
     $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
     $g.DrawString($txt, $f, $wb, (New-Object System.Drawing.RectangleF 0, 0, 16, 16), $sf)
-    $g.Dispose(); $br.Dispose(); $f.Dispose(); $wb.Dispose()
-    [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+    $g.Dispose(); $br.Dispose(); $f.Dispose(); $wb.Dispose(); $sf.Dispose()
+
+    # GetHicon hands back a raw OS handle that nothing owns: Icon.FromHandle does
+    # not take it over and Icon.Dispose does not free it. Cloning gives an icon
+    # that owns its own copy, and then the handle and the bitmap can go. Without
+    # this the tray leaked about 2.4 GDI objects a minute and hit the 10.000
+    # per-process ceiling in three days, after which the app could not so much as
+    # build a cursor.
+    $hicon = $bmp.GetHicon()
+    try {
+        $tmp = [System.Drawing.Icon]::FromHandle($hicon)
+        try { $tmp.Clone() } finally { $tmp.Dispose() }
+    } finally {
+        [void][MtWin]::DestroyIcon($hicon)
+        $bmp.Dispose()
+    }
 }
+
+$script:TrayShows = $null
 
 function Update-MtTrayIcon {
     if (-not $script:Tray) { return }
     $s = Get-MtSummary
-    $old = $script:Tray.Icon
-    $script:Tray.Icon = New-MtTrayIcon $s.Trophies
-    if ($old) { $old.Dispose() }
+    # The icon shows the trophy count, which only moves when a match lands. The
+    # poll runs every minute, so redrawing it every time was churn either way.
+    $mostra = [string]$s.Trophies
+    if ($mostra -ne $script:TrayShows) {
+        $old = $script:Tray.Icon
+        $script:Tray.Icon = New-MtTrayIcon $s.Trophies
+        if ($old) { $old.Dispose() }
+        $script:TrayShows = $mostra
+    }
     $tip = "Merge Tactics`n" + ((L 'tray.tip') -f $s.Trophies, $s.Arena)
     if ($tip.Length -gt 62) { $tip = $tip.Substring(0, 62) }
     $script:Tray.Text = $tip

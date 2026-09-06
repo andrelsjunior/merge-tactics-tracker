@@ -26,7 +26,7 @@ Isto mostra.
 
 | Ação | Como |
 |---|---|
-| Abrir o painel | duplo clique no ícone da bandeja, ou `MergeTactics.bat` |
+| Abrir o painel | atalho **Merge Tactics** na área de trabalho, duplo clique no ícone da bandeja, ou `MergeTactics.bat` |
 | Iniciar | `MergeTactics.bat` (ou sozinho no logon) |
 | Pausar / Sair | menu do botão direito no ícone |
 | Parar tudo | `Stop.ps1` |

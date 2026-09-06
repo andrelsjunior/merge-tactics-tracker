@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 public static class MtWin {
   [DllImport("user32.dll")] public static extern bool ReleaseCapture();
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int m, int w, int l);
+  [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);
   public const int WM_NCLBUTTONDOWN = 0xA1; public const int HTCAPTION = 0x2;
   public static void Drag(IntPtr h){ ReleaseCapture(); SendMessage(h, WM_NCLBUTTONDOWN, HTCAPTION, 0); }
 }

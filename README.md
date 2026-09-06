@@ -131,6 +131,9 @@ death leaves a trace.
 
 ## Files
 
+A desktop shortcut opens the panel: it starts the app if it is not running, and
+otherwise brings up the panel of the instance that is. `Install.ps1` creates it.
+
 ```
 MergeTactics.ps1   app: collection, queries, panel assembly
 MtUi.ps1           visual components, drawn in GDI+
