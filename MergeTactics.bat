@@ -1,3 +1,4 @@
-@echo off
-rem Starts the app; if already running, opens the existing instance's panel.
-start "" wscript.exe "%~dp0Start.vbs"
+@echo off
+rem Opens the panel: starts the app if it is not running, otherwise brings up
+rem the panel of the instance that is.
+start "" wscript.exe "%~dp0Start.vbs" show
