@@ -223,7 +223,8 @@ function Invoke-MtPoll {
         if ($prevArena) {
             Write-MtLog "ARENA: $prevArena -> $arena"
             Write-MtEvent $script:Db 'arena_change' "$prevArena -> $arena"
-            Show-MtToast (L 'toast.arena') ((L 'toast.arena.body') -f $arena, $trophies)
+            try { Show-MtToast (L 'toast.arena') ((L 'toast.arena.body') -f $arena, $trophies) }
+            catch { Write-MtLog "toast: $_" }
         }
         Set-MtState $script:Db 'arena' $arena
     }
@@ -267,13 +268,20 @@ function Invoke-MtPoll {
         $sign = if ($delta -gt 0) { "+$delta" } else { "$delta" }
         $place = Get-MtPlacement $delta $trophies
         Write-MtLog "MATCH $sign -> $trophies (place $place)"
-        Show-MtToast 'Merge Tactics' ((L 'toast.match') -f (Get-MtOrd $place), $sign, $trophies, $arena)
     }
 
-    Update-MtTrayIcon
-    # The panel did not refresh itself: the header (trophies, best, streak)
-    # stayed frozen at the moment the window was opened.
-    if ($delta -ne 0) { Update-MtPanelData $script:MtPeriod }
+    # What is left is presentation, and none of it may take the poll down or take
+    # each other down. The match is already written by this point: when the tray
+    # icon threw, the exception escaped before the panel was told, so the window
+    # kept showing the previous trophy count while the database had the new one.
+    if ($delta -ne 0) {
+        try { Show-MtToast 'Merge Tactics' ((L 'toast.match') -f (Get-MtOrd $place), $sign, $trophies, $arena) }
+        catch { Write-MtLog "toast: $_" }
+    }
+    try { Update-MtTrayIcon } catch { Write-MtLog "tray icon: $_" }
+    if ($delta -ne 0) {
+        try { Update-MtPanelData $script:MtPeriod } catch { Write-MtLog "panel refresh: $_" }
+    }
 }
 
 function Get-MtInterval {
