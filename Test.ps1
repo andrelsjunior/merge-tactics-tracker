@@ -303,6 +303,22 @@ Check 'an expanded session paints its matches' {
     $filled
 }
 
+Check 'nothing in the poll can stop the panel being told about a match' {
+    # the row is written first; the toast, the tray icon and the repaint are
+    # presentation, and one of them failing must not swallow the others
+    $src = Get-Content "$Root\MergeTactics.ps1" -Raw
+    if ($src -notmatch '(?s)function Invoke-MtPoll\b.*?\n\}') { return $false }
+    $corpo = $Matches[0]
+    $bare = @()
+    foreach ($chamada in @('Show-MtToast', 'Update-MtTrayIcon', 'Update-MtPanelData')) {
+        foreach ($m in [regex]::Matches($corpo, '(?m)^(\s*)(?:try \{ )?' + $chamada)) {
+            if ($m.Value -notmatch 'try \{') { $bare += $chamada }
+        }
+    }
+    if ($bare.Count) { Write-Host ("        unguarded: " + (($bare | Sort-Object -Unique) -join ', ')) }
+    $bare.Count -eq 0
+}
+
 Write-Host "`nhandles"
 Check 'building the tray icon leaks no GDI objects' {
     # GetHicon hands back a raw OS handle that Icon.Dispose does not free. Left
